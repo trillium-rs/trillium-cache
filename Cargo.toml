@@ -1,0 +1,21 @@
+[package]
+name = "trillium-cache"
+version = "0.1.0"
+edition = "2024"
+description = "http cache handler for trillium.rs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trillium-rs/trillium"
+readme = "README.md"
+keywords = ["trillium", "cache", "http"]
+categories = ["caching", "web-programming::http-client"]
+
+[dependencies]
+httpdate = "1.0.3"
+log = "0.4.29"
+trillium-caching-headers.workspace = true
+trillium-client.workspace = true
+
+[dev-dependencies]
+trillium.workspace = true
+trillium-smol.workspace = true
+trillium-testing.workspace = true
