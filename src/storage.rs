@@ -1,9 +1,10 @@
 //! Cache storage trait and an unbounded in-memory implementation.
 //!
-//! The trait defines the persistence boundary for a cache: lookup,
+//! [`CacheStorage`] is the persistence boundary for a cache: lookup,
 //! insert, and invalidate, all keyed by [`CacheKey`] (URL + method).
-//! Multiple entries may live under one key, distinguished by the
-//! response's `Vary` signature; the handler iterates and matches via
+//! A key may hold multiple entries — one per `Vary` signature — and
+//! `get` returns the full list under a key. Picking the right entry for
+//! a given request is the caller's job, via
 //! [`CachePolicy::before_request`].
 
 use crate::CachePolicy;
@@ -78,10 +79,8 @@ impl CacheEntry {
         &self.body
     }
 
-    /// Decompose this entry into its policy and body. Used by the
-    /// handler when serving a hit — the body bytes flow into the
-    /// response and the policy informs whether the entry should be
-    /// re-stored after a revalidation.
+    /// Decompose this entry into its policy and body, consuming the
+    /// entry.
     pub fn into_parts(self) -> (CachePolicy, Vec<u8>) {
         (self.policy, self.body)
     }
@@ -89,8 +88,8 @@ impl CacheEntry {
 
 /// Storage backend for cached responses.
 ///
-/// Each key may carry multiple entries distinguished by the response's
-/// `Vary` signature; the handler iterates and matches via
+/// A key may carry multiple entries, one per `Vary` signature. `get`
+/// returns the full list under a key; the caller chooses among them via
 /// [`CachePolicy::before_request`].
 pub trait CacheStorage: Debug + Send + Sync + 'static {
     /// Fetch all entries stored under `key`. Returns an empty vec when
@@ -102,21 +101,17 @@ pub trait CacheStorage: Debug + Send + Sync + 'static {
     /// new entry is appended.
     fn put(&self, key: CacheKey, entry: CacheEntry) -> impl Future<Output = ()> + Send;
 
-    /// Remove all entries stored under `key`. Used by the handler on
-    /// unsafe-method invalidation (RFC 9111 §4.4).
+    /// Remove all entries stored under `key`.
     fn invalidate(&self, key: &CacheKey) -> impl Future<Output = ()> + Send;
 }
 
 /// Unbounded in-memory cache storage backed by a [`HashMap`].
 ///
-/// Useful for tests, conformance smoke-testing, and as a starting
-/// point before a real backend ships.
-///
-/// **Memory grows without bound.** Put requests with the same `(URL,
-/// method, Vary)` triple replace older entries, but distinct Vary
-/// signatures and distinct keys accumulate forever. For real workloads
-/// ship a size-aware backend; this one will OOM eventually under
-/// sustained traffic.
+/// **Memory grows without bound.** Put requests with the same
+/// `(URL, method, Vary)` triple replace older entries, but distinct
+/// Vary signatures and distinct keys accumulate forever. Suitable for
+/// tests and short-lived processes; production workloads need a
+/// size-aware backend.
 #[derive(Debug, Default)]
 pub struct InMemoryStorage {
     entries: RwLock<HashMap<CacheKey, Vec<CacheEntry>>>,
@@ -128,8 +123,7 @@ impl InMemoryStorage {
         Self::default()
     }
 
-    /// Total number of stored entries across all keys. Useful for
-    /// assertions in tests.
+    /// Total number of stored entries across all keys.
     pub fn len(&self) -> usize {
         self.entries.read().unwrap().values().map(Vec::len).sum()
     }

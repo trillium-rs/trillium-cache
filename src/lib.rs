@@ -51,6 +51,6 @@ pub mod client;
 mod test_helpers;
 
 pub use policy::{CacheOptions, CachePolicy};
-pub use server::{Cache, DEFAULT_MAX_CACHEABLE_SIZE};
+pub use server::Cache;
 pub use storage::{CacheEntry, CacheKey, CacheStorage, InMemoryStorage};
 pub use validation::{AfterResponse, BeforeRequest, CachedResponse};

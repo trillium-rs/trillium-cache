@@ -76,27 +76,35 @@ fn is_valid_sf_key(s: &str) -> bool {
 }
 
 /// Configuration that controls cache behavior.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, fieldwork::Fieldwork)]
+#[fieldwork(get, set, get_mut, with, rename_predicates)]
 pub struct CacheOptions {
-    /// If `true`, the cache is treated as a *shared cache* (proxy/CDN per
-    /// RFC 9111 §1.2.1): `s-maxage` is honored, `private` responses are
-    /// refused, and `Authorization`-bearing requests require explicit
-    /// opt-in (`public`, `s-maxage`, or `must-revalidate`).
+    /// whether the cache is treated as a *shared cache*
     ///
-    /// `false` (the default) treats the cache as a single-user
-    /// (browser-style) private cache. `trillium-proxy` should set this
-    /// to `true`.
-    pub shared: bool,
+    /// Shared cache, suitable for a proxy or cdn: `s-maxage` is honored, `private` responses are
+    /// refused, and `Authorization`-bearing requests require explicit opt-in (`public`,
+    /// `s-maxage`, or `must-revalidate`)
+    ///
+    /// Non-shared-cache (the default) treats the cache as a single-user (browser-style) private
+    /// cache.
+    ///
+    /// Default: false
+    pub(crate) shared: bool,
 
-    /// Heuristic-freshness ratio (RFC 9111 §4.2.2). When a response has
-    /// no explicit expiration but does have `Last-Modified`, freshness
+    /// heuristic-freshness ratio
+    ///
+    /// When a response has no explicit expiration but does have `Last-Modified`, freshness
     /// lifetime is computed as `cache_heuristic * (Date - Last-Modified)`.
-    /// Default: 0.1 (10%).
-    pub cache_heuristic: f32,
+    ///
+    /// Default: 0.1 (10%)
+    pub(crate) cache_heuristic: f32,
 
-    /// Default freshness lifetime for responses with `Cache-Control:
-    /// immutable` and no other expiration. Default: 24h.
-    pub immutable_min_time_to_live: Duration,
+    /// the default freshness lifetime for responses with `Cache-Control:
+    /// immutable` and no other expiration
+    ///
+    /// Default: 24h
+    #[field(copy)]
+    pub(crate) immutable_min_time_to_live: Duration,
 }
 
 impl Default for CacheOptions {
@@ -220,6 +228,7 @@ fn build_vary_snapshot(
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+    use trillium_client::ConnExt;
     use trillium_http::KnownHeaderName::*;
 
     // RFC 9110 §5.3: multiple `Vary:` lines fold to one comma-list.

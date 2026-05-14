@@ -5,7 +5,7 @@ use crate::{
     validation::{AfterResponse, BeforeRequest},
 };
 use std::time::{Duration, SystemTime};
-use trillium_client::{Client, Conn, KnownHeaderName, Method, Status};
+use trillium_client::{Client, Conn, ConnExt, KnownHeaderName, Method, Status};
 use trillium_testing::ServerConnector;
 
 /// Build a conn whose request side and response side are both fully

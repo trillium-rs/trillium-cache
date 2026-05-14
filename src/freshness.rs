@@ -8,10 +8,9 @@ use std::time::{Duration, SystemTime};
 use trillium_http::KnownHeaderName;
 
 impl CachePolicy {
-    /// RFC 9111 §4.2.3: how long the response has been "in the cache
-    /// system". Sum of any prior `Age` header value plus the wall-clock
-    /// time the response has been resident in this cache.
-    pub fn age(&self, now: SystemTime) -> Duration {
+    // How long the response has been in the cache system: any prior `Age`
+    // header value plus the wall-clock time resident in this cache.
+    pub(crate) fn age(&self, now: SystemTime) -> Duration {
         let mut age = self.age_header_value();
         if let Ok(resident_time) = now.duration_since(self.response_time) {
             age += resident_time;
@@ -19,9 +18,9 @@ impl CachePolicy {
         age
     }
 
-    /// RFC 9111 §4.2: approximate time until the response becomes stale
-    /// (`Duration::ZERO` once stale).
-    pub fn time_to_live(&self, now: SystemTime) -> Duration {
+    // Approximate time until the response becomes stale (`Duration::ZERO`
+    // once stale).
+    pub(crate) fn time_to_live(&self, now: SystemTime) -> Duration {
         self.max_age()
             .checked_sub(self.age(now))
             .unwrap_or_default()
@@ -168,22 +167,24 @@ impl CachePolicy {
         Duration::from_secs(secs)
     }
 
-    /// RFC 9111 §4.2.4 / RFC 5861: window past `max_age` during which a
-    /// cache may serve this stale response while a background
-    /// revalidation runs. `Duration::ZERO` if the response did not
-    /// advertise `stale-while-revalidate`.
-    pub fn stale_while_revalidate_window(&self) -> Duration {
+    // Window past `max_age` during which a cache may serve this stale
+    // response while a background revalidation runs. `Duration::ZERO` if the
+    // response did not advertise `stale-while-revalidate`.
+    //
+    // Gated on `client`: only the client handler currently does background
+    // revalidation. Ungate when the server gains background SWR.
+    #[cfg(feature = "client")]
+    pub(crate) fn stale_while_revalidate_window(&self) -> Duration {
         self.response_cache_control
             .as_ref()
             .and_then(|cc| cc.stale_while_revalidate())
             .unwrap_or(Duration::ZERO)
     }
 
-    /// RFC 9111 §4.2.4 / RFC 5861: window past `max_age` during which a
-    /// cache may serve this stale response when origin revalidation
-    /// fails. `Duration::ZERO` if the response did not advertise
-    /// `stale-if-error`.
-    pub fn stale_if_error_window(&self) -> Duration {
+    // Window past `max_age` during which a cache may serve this stale
+    // response when origin revalidation fails. `Duration::ZERO` if the
+    // response did not advertise `stale-if-error`.
+    pub(crate) fn stale_if_error_window(&self) -> Duration {
         self.response_cache_control
             .as_ref()
             .and_then(|cc| cc.stale_if_error())

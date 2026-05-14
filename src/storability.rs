@@ -48,11 +48,10 @@ pub(crate) fn response_has_explicit_expiration(
 }
 
 impl CachePolicy {
-    /// RFC 9111 §3 — *Storing Responses in Caches*.
-    ///
-    /// Returns `true` if a cache MAY store the response described by the supplied parts. If
-    /// `false`, the caller MUST NOT store anything for this exchange.
-    pub fn is_storable(
+    // Whether a cache may store the response described by the supplied
+    // parts. When false, the caller MUST NOT store anything for this
+    // exchange.
+    pub(crate) fn is_storable(
         method: Method,
         request_headers: &Headers,
         status: Status,

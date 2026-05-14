@@ -14,25 +14,9 @@
 //! );
 //! ```
 //!
-//! Or in front of a `trillium-proxy` upstream to get a shared (CDN-style) cache:
+//! ## Stale-while-revalidate not currently implemented
 //!
-//! ```ignore
-//! let app = (
-//!     trillium_cache::Cache::new(InMemoryStorage::new()).shared(),
-//!     trillium_proxy::Proxy::new(ClientConfig::default(), "https://origin.example"),
-//! );
-//! ```
-//!
-//! Reasons for that ordering:
-//! - `run` runs in declared order; the cache must run *before* the producer so it can short-circuit
-//!   (halt) on a fresh hit and skip the producer entirely.
-//! - `before_send` runs in reverse order; the cache's capture-and-store therefore runs *after* the
-//!   producer has finalized the response, so the cache sees the body the producer actually intended
-//!   to send.
-//!
-//! ## Status: 0.1
-//!
-//! This first cut does not yet implement `stale-while-revalidate`. A stale entry within its
+//! This handler does not yet implement `stale-while-revalidate`. A stale entry within its
 //! `stale-while-revalidate` window will fall through to synchronous revalidation (the inner
 //! handler runs while the request is in flight). `stale-if-error` recovery *is* supported: when
 //! the downstream handler produces a 5xx and the stored entry is SIE-eligible, the cache serves
@@ -85,8 +69,8 @@ impl<S: CacheStorage> Cache<S> {
         self
     }
 
-    /// Mark this cache as a *shared cache* (proxy/CDN per RFC 9111
-    /// §1.2.1). Equivalent to `with_options` with `shared: true`.
+    /// Mark this cache as a *shared cache* (proxy/CDN). Equivalent to
+    /// `with_options` with `shared: true`.
     pub fn shared(mut self) -> Self {
         self.options.shared = true;
         self

@@ -22,7 +22,9 @@ use crate::{
     AfterResponse, BeforeRequest, CacheEntry, CacheKey, CacheOptions, CachePolicy, CacheStorage,
 };
 use std::{sync::Arc, time::SystemTime};
-use trillium_client::{Client, ClientHandler, Conn, Headers, KnownHeaderName, Method, Result, Url};
+use trillium_client::{
+    Client, ClientHandler, Conn, ConnExt, Headers, KnownHeaderName, Method, Result, Url,
+};
 
 /// Default cap on body bytes the cache will store. Larger responses
 /// pass through unmodified but are not cached.
@@ -31,9 +33,8 @@ pub const DEFAULT_MAX_CACHEABLE_SIZE: usize = 16 * 1024 * 1024;
 /// Cache handler. Mount on a [`trillium_client::Client`] together with
 /// a [`CacheStorage`] backend.
 ///
-/// `Cache` is `Clone`: storage is held internally in an `Arc`, so cloning
-/// is cheap and the spawned background revalidation future used by
-/// `stale-while-revalidate` shares the same backend.
+/// `Cache` is cheap to `Clone`: storage is held in an `Arc`, so clones
+/// share the same backend.
 #[derive(Debug)]
 pub struct Cache<S: CacheStorage> {
     storage: Arc<S>,
@@ -68,8 +69,8 @@ impl<S: CacheStorage> Cache<S> {
         self
     }
 
-    /// Mark this cache as a *shared cache* (proxy/CDN per RFC 9111
-    /// §1.2.1). Equivalent to `with_options` with `shared: true`.
+    /// Mark this cache as a *shared cache* (proxy/CDN). Equivalent to
+    /// `with_options` with `shared: true`.
     pub fn shared(mut self) -> Self {
         self.options.shared = true;
         self

@@ -19,6 +19,7 @@ features = ["client"]
 client = ["dep:trillium-client"]
 
 [dependencies]
+fieldwork = "0.5.1"
 httpdate = "1.0.3"
 log = "0.4.29"
 trillium.workspace = true
