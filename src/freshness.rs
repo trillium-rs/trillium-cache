@@ -5,7 +5,7 @@
 
 use crate::policy::CachePolicy;
 use std::time::{Duration, SystemTime};
-use trillium_client::KnownHeaderName;
+use trillium_http::KnownHeaderName;
 
 impl CachePolicy {
     /// RFC 9111 §4.2.3: how long the response has been "in the cache
@@ -252,8 +252,8 @@ fn parse_age_value(raw: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CachePolicy, test_helpers::*};
-    use trillium_client::{KnownHeaderName::*, Method, Status};
+    use crate::test_helpers::*;
+    use trillium_http::{KnownHeaderName::*, Method, Status};
 
     // §5.2.2.1: max-age=N is fresh for N, stale after.
     #[test]
@@ -264,7 +264,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(!policy.is_stale(t0()));
         assert!(!policy.is_stale(at(t0(), 599)));
         assert!(policy.is_stale(at(t0(), 600)));
@@ -282,8 +282,8 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600, s-maxage=300")],
         );
-        let shared = CachePolicy::new(&conn, t0(), shared_cache());
-        let private = CachePolicy::new(&conn, t0(), private_cache());
+        let shared = policy_from(&conn, t0(), shared_cache());
+        let private = policy_from(&conn, t0(), private_cache());
         assert!(shared.is_stale(at(t0(), 301)));
         assert!(!shared.is_stale(at(t0(), 299)));
         assert!(!private.is_stale(at(t0(), 301)));
@@ -299,7 +299,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600, no-cache")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_stale(t0()));
         assert_eq!(policy.time_to_live(t0()), Duration::ZERO);
     }
@@ -313,7 +313,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600"), (Vary, "*")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_stale(t0()));
     }
 
@@ -326,8 +326,8 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600, proxy-revalidate")],
         );
-        assert!(CachePolicy::new(&conn, t0(), shared_cache()).is_stale(t0()));
-        assert!(!CachePolicy::new(&conn, t0(), private_cache()).is_stale(t0()));
+        assert!(policy_from(&conn, t0(), shared_cache()).is_stale(t0()));
+        assert!(!policy_from(&conn, t0(), private_cache()).is_stale(t0()));
     }
 
     // Set-Cookie on shared cache without public/immutable: treat as
@@ -341,8 +341,8 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600"), (SetCookie, "k=v")],
         );
-        assert!(CachePolicy::new(&conn, t0(), shared_cache()).is_stale(t0()));
-        assert!(!CachePolicy::new(&conn, t0(), private_cache()).is_stale(t0()));
+        assert!(policy_from(&conn, t0(), shared_cache()).is_stale(t0()));
+        assert!(!policy_from(&conn, t0(), private_cache()).is_stale(t0()));
     }
 
     #[test]
@@ -353,14 +353,14 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "public, max-age=600"), (SetCookie, "k=v")],
         );
-        assert!(!CachePolicy::new(&conn, t0(), shared_cache()).is_stale(t0()));
+        assert!(!policy_from(&conn, t0(), shared_cache()).is_stale(t0()));
     }
 
     // §5.2.2.2: immutable provides a default freshness lifetime.
     #[test]
     fn immutable_uses_immutable_min_ttl() {
         let conn = exchange(Method::Get, &[], Status::Ok, &[(CacheControl, "immutable")]);
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         // Default immutable_min_time_to_live is 24h.
         assert!(!policy.is_stale(at(t0(), 23 * 3600)));
         assert!(policy.is_stale(at(t0(), 24 * 3600 + 1)));
@@ -381,7 +381,7 @@ mod tests {
                 (CacheControl, "max-age=60"),
             ],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_stale(at(t0(), 61)));
     }
 
@@ -396,7 +396,7 @@ mod tests {
             Status::Ok,
             &[(Date, &date), (Expires, &expires)],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(!policy.is_stale(at(t0(), 599)));
         assert!(policy.is_stale(at(t0(), 601)));
     }
@@ -410,7 +410,7 @@ mod tests {
             Status::Ok,
             &[(Expires, "not a real date")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_stale(t0()));
     }
 
@@ -427,7 +427,7 @@ mod tests {
             Status::Ok,
             &[(Date, &date), (LastModified, &lm)],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(!policy.is_stale(at(t0(), 9 * 86400)));
         assert!(policy.is_stale(at(t0(), 11 * 86400)));
     }
@@ -441,7 +441,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600"), (Age, "300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert_eq!(policy.age(t0()), Duration::from_secs(300));
         assert_eq!(policy.time_to_live(t0()), Duration::from_secs(300));
         assert!(policy.is_stale(at(t0(), 301)));
@@ -456,7 +456,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert_eq!(policy.age(t0()), Duration::ZERO);
         assert_eq!(policy.age(at(t0(), 250)), Duration::from_secs(250));
     }
@@ -471,7 +471,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60, stale-while-revalidate=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert_eq!(
             policy.stale_while_revalidate_window(),
             Duration::from_secs(300)
@@ -487,7 +487,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60, stale-if-error=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert_eq!(policy.stale_if_error_window(), Duration::from_secs(300));
         assert_eq!(policy.stale_while_revalidate_window(), Duration::ZERO);
     }
@@ -501,7 +501,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600, stale-while-revalidate=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(!policy.is_swr_eligible(t0()));
         assert!(!policy.is_swr_eligible(at(t0(), 500)));
     }
@@ -515,7 +515,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60, stale-while-revalidate=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         // age=100, max_age=60 → staleness=40 < 300 (window).
         assert!(policy.is_swr_eligible(at(t0(), 100)));
     }
@@ -529,7 +529,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60, stale-while-revalidate=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         // age=400, max_age=60 → staleness=340 > 300.
         assert!(!policy.is_swr_eligible(at(t0(), 400)));
     }
@@ -546,7 +546,7 @@ mod tests {
                 "max-age=60, must-revalidate, stale-while-revalidate=300, stale-if-error=300",
             )],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(!policy.is_swr_eligible(at(t0(), 100)));
         assert!(!policy.is_sie_eligible(at(t0(), 100)));
     }
@@ -563,8 +563,8 @@ mod tests {
                 "max-age=60, proxy-revalidate, stale-while-revalidate=300",
             )],
         );
-        let shared = CachePolicy::new(&conn, t0(), shared_cache());
-        let private = CachePolicy::new(&conn, t0(), private_cache());
+        let shared = policy_from(&conn, t0(), shared_cache());
+        let private = policy_from(&conn, t0(), private_cache());
         // Shared cache: proxy-revalidate forbids stale serving.
         assert!(!shared.is_swr_eligible(at(t0(), 100)));
         // But max_age=0 for shared due to proxy-revalidate (freshness
@@ -583,7 +583,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60, stale-if-error=300")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_sie_eligible(at(t0(), 100)));
         assert!(!policy.is_sie_eligible(at(t0(), 400)));
         // No SWR set → never SWR-eligible.
@@ -599,7 +599,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=60")],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert!(policy.is_stale(at(t0(), 100)));
         assert!(!policy.is_swr_eligible(at(t0(), 100)));
         assert!(!policy.is_sie_eligible(at(t0(), 100)));
@@ -650,7 +650,7 @@ mod tests {
                 (CdnCacheControl, "max-age=10000"),
             ],
         );
-        let policy = CachePolicy::new(&conn, t0(), shared_cache());
+        let policy = policy_from(&conn, t0(), shared_cache());
         assert_eq!(policy.max_age(), Duration::from_secs(10000));
         // 100s past response_time, with max_age=10000 → still fresh.
         assert!(!policy.is_stale(at(t0(), 100)));
@@ -669,7 +669,7 @@ mod tests {
                 (CdnCacheControl, "max-age=10000"),
             ],
         );
-        let policy = CachePolicy::new(&conn, t0(), private_cache());
+        let policy = policy_from(&conn, t0(), private_cache());
         assert_eq!(policy.max_age(), Duration::from_secs(1));
         assert!(policy.is_stale(at(t0(), 100)));
     }

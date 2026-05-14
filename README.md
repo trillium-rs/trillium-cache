@@ -11,16 +11,37 @@
 [docs-badge]: https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square
 [docs]: https://docs.rs/trillium-cache
 
-A client-side HTTP cache for [`trillium-client`](https://docs.rs/trillium-client),
-implementing [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111) caching semantics
-including the `stale-while-revalidate` and `stale-if-error` extensions from
-[RFC 5861](https://www.rfc-editor.org/rfc/rfc5861).
+An [RFC 9111] HTTP cache for Trillium. The primary form is a server handler — place it before the handler whose responses you want to cache, or in front of a `trillium-proxy` upstream for shared (CDN-style) caching. With the `client` feature enabled, the same caching logic is also available as a [`trillium-client`](https://docs.rs/trillium-client) handler.
 
-The primary intended consumer is
-[`trillium-proxy`](https://docs.rs/trillium-proxy), but the handler can be
-mounted on any `trillium-client::Client` for caching HTTP user-agent use.
+## Example
 
-**Status: work in progress.**
+```rust,no_run
+use trillium::Conn;
+use trillium_cache::{Cache, InMemoryStorage};
+
+let app = (
+    Cache::new(InMemoryStorage::new()),
+    |conn: Conn| async move { conn.ok("hello") },
+);
+
+// run with your chosen runtime adapter, e.g.:
+// trillium_smol::run(app);
+```
+
+For a shared cache (proxy/CDN per [RFC 9111] §1.2.1), enable shared-cache semantics with `.shared()` and place it in front of your upstream handler:
+
+```rust,no_run
+use trillium_cache::{Cache, InMemoryStorage};
+
+let cache = Cache::new(InMemoryStorage::new()).shared();
+```
+
+## Status
+
+0.1. RFC 9111 coverage: storability, freshness, conditional revalidation, `Vary`, unsafe-method invalidation, plus `stale-if-error` recovery from [RFC 5861]. Background `stale-while-revalidate` is not yet implemented for the server handler — stale entries within their SWR window currently fall through to synchronous revalidation.
+
+[RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
+[RFC 5861]: https://www.rfc-editor.org/rfc/rfc5861
 
 ## Safety
 

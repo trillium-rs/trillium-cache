@@ -1,5 +1,7 @@
-//! `Cache: ClientHandler` — wires [`CacheStorage`] + [`CachePolicy`]
-//! onto a `trillium-client` request lifecycle.
+//! Client-side cache handler.
+//!
+//! [`Cache`] wires [`CacheStorage`] + [`CachePolicy`] onto a `trillium-client` request
+//! lifecycle. Feature-gated behind `client`.
 //!
 //! ## Position in the handler chain
 //!
@@ -51,8 +53,7 @@ impl<S: CacheStorage> Clone for Cache<S> {
 
 impl<S: CacheStorage> Cache<S> {
     /// Construct a cache handler with default options
-    /// ([`CacheOptions::default`]) and the default body-size cap
-    /// ([`DEFAULT_MAX_CACHEABLE_SIZE`]).
+    /// ([`CacheOptions::default`]) and a 16 MiB body-size cap.
     pub fn new(storage: S) -> Self {
         Self {
             storage: Arc::new(storage),
@@ -130,7 +131,7 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
         log::trace!("cache: {} stored candidate(s) for {key}", entries.len());
 
         for entry in entries {
-            match entry.policy().before_request(conn, now) {
+            match entry.policy().before_request(conn.request_headers(), now) {
                 BeforeRequest::Fresh(cached) => {
                     // Apply cached response head; serve cached body;
                     // halt to skip the network round-trip.
@@ -148,9 +149,7 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                     // RFC 9111 §4.3.2 + RFC 9110 §13.2.2: client's
                     // conditional already matches the cached entry. Send
                     // 304 with stripped headers and no body.
-                    log::trace!(
-                        "cache: hit (fresh, conditional matches) for {key}, serving 304"
-                    );
+                    log::trace!("cache: hit (fresh, conditional matches) for {key}, serving 304");
                     *conn.response_headers_mut() = cached.headers;
                     conn.set_status(cached.status)
                         .set_response_body(b"" as &[u8])
@@ -186,9 +185,7 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                     // revalidation: splice conditional-revalidation
                     // headers onto the outbound request; resolve in
                     // `after_response`.
-                    log::trace!(
-                        "cache: stale for {key}, sending conditional revalidation request"
-                    );
+                    log::trace!("cache: stale for {key}, sending conditional revalidation request");
                     *conn.request_headers_mut() = request_headers;
                     conn.insert_state(CacheCtx::Revalidation { stored: entry, key });
                     return Ok(());
@@ -378,14 +375,22 @@ impl<S: CacheStorage> Cache<S> {
             // the SWR/SIE windows they'll attempt synchronous
             // revalidation again.
             log::trace!(
-                "cache: background revalidation transport error for {key} ({e}), leaving \
-                 stored entry"
+                "cache: background revalidation transport error for {key} ({e}), leaving stored \
+                 entry"
             );
             return;
         }
 
         let now = SystemTime::now();
-        match stored.policy().after_response(&new_conn, now) {
+        let new_status = new_conn
+            .status()
+            .expect("background revalidation: response not yet received");
+        match stored.policy().after_response(
+            new_conn.request_headers(),
+            new_status,
+            new_conn.response_headers(),
+            now,
+        ) {
             AfterResponse::NotModified(new_policy, _) => {
                 // 304 with matching validators: keep cached body,
                 // refresh headers + response_time.
@@ -397,19 +402,23 @@ impl<S: CacheStorage> Cache<S> {
             }
             AfterResponse::Modified(new_policy, _) => {
                 let Ok(body) = new_conn.response_body().read_bytes().await else {
-                    log::trace!(
-                        "cache: background revalidation read error for {key}, dropping"
-                    );
+                    log::trace!("cache: background revalidation read error for {key}, dropping");
                     return;
                 };
                 let body_len = body.len();
                 if body_len > self.max_cacheable_size {
                     log::trace!(
-                        "cache: background revalidation 200 for {key}, body {body_len} > \
-                         max {}, dropping",
+                        "cache: background revalidation 200 for {key}, body {body_len} > max {}, \
+                         dropping",
                         self.max_cacheable_size
                     );
-                } else if !CachePolicy::is_storable(&new_conn, &self.options) {
+                } else if !CachePolicy::is_storable(
+                    new_conn.method(),
+                    new_conn.request_headers(),
+                    new_status,
+                    new_conn.response_headers(),
+                    &self.options,
+                ) {
                     log::trace!(
                         "cache: background revalidation 200 for {key}, response not storable, \
                          dropping"
@@ -433,7 +442,13 @@ impl<S: CacheStorage> Cache<S> {
         key: CacheKey,
     ) -> Result<()> {
         let now = SystemTime::now();
-        match stored.policy().after_response(conn, now) {
+        let new_status = conn.status().expect("checked above");
+        match stored.policy().after_response(
+            conn.request_headers(),
+            new_status,
+            conn.response_headers(),
+            now,
+        ) {
             AfterResponse::NotModified(new_policy, cached_response) => {
                 // 304 with matching validators: reuse stored body,
                 // apply merged head, refresh storage entry.
@@ -458,19 +473,25 @@ impl<S: CacheStorage> Cache<S> {
                 conn.set_response_body(body.clone());
                 if body_len > self.max_cacheable_size {
                     log::trace!(
-                        "cache: revalidation 200 for {key}, body {body_len} > max {}, served \
-                         but not stored",
+                        "cache: revalidation 200 for {key}, body {body_len} > max {}, served but \
+                         not stored",
                         self.max_cacheable_size
                     );
-                } else if !CachePolicy::is_storable(conn, &self.options) {
+                } else if !CachePolicy::is_storable(
+                    conn.method(),
+                    conn.request_headers(),
+                    new_status,
+                    conn.response_headers(),
+                    &self.options,
+                ) {
                     log::trace!(
-                        "cache: revalidation 200 for {key}, response not storable, served but \
-                         not stored"
+                        "cache: revalidation 200 for {key}, response not storable, served but not \
+                         stored"
                     );
                 } else {
                     log::trace!(
-                        "cache: revalidation 200 for {key}, replacing stored entry \
-                         ({body_len} bytes)"
+                        "cache: revalidation 200 for {key}, replacing stored entry ({body_len} \
+                         bytes)"
                     );
                     self.storage
                         .put(key, CacheEntry::new(new_policy, body))
@@ -482,7 +503,14 @@ impl<S: CacheStorage> Cache<S> {
     }
 
     async fn handle_miss(&self, conn: &mut Conn, key: CacheKey) -> Result<()> {
-        if !CachePolicy::is_storable(conn, &self.options) {
+        let status = conn.status().expect("checked above");
+        if !CachePolicy::is_storable(
+            conn.method(),
+            conn.request_headers(),
+            status,
+            conn.response_headers(),
+            &self.options,
+        ) {
             log::trace!("cache: miss for {key}, response not storable, passing through");
             return Ok(());
         }
@@ -496,7 +524,14 @@ impl<S: CacheStorage> Cache<S> {
             );
         } else {
             log::trace!("cache: miss for {key}, storing {body_len} bytes");
-            let policy = CachePolicy::new(conn, SystemTime::now(), self.options);
+            let policy = CachePolicy::new(
+                conn.method(),
+                conn.request_headers(),
+                status,
+                conn.response_headers().clone(),
+                SystemTime::now(),
+                self.options,
+            );
             self.storage.put(key, CacheEntry::new(policy, body)).await;
         }
         Ok(())
@@ -720,7 +755,11 @@ mod tests {
         // The cached entry for other.example/loc is still intact.
         let mut r = client.get("http://other.example/loc").await?;
         assert_eq!(r.response_body().read_string().await?, "get-0");
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "no extra GET to other.example");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "no extra GET to other.example"
+        );
         Ok(())
     }
 
@@ -913,7 +952,8 @@ mod tests {
             Status::Ok,
             &[(KnownHeaderName::CacheControl, cache_control)],
         );
-        let policy = CachePolicy::new(&conn, SystemTime::now(), CacheOptions::default());
+        let policy =
+            crate::test_helpers::policy_from(&conn, SystemTime::now(), CacheOptions::default());
         let key = CacheKey::new(Method::Get, "http://example.com/x".parse().unwrap());
         storage
             .put(key.clone(), CacheEntry::new(policy, body.to_vec()))

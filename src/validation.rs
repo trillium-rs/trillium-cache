@@ -7,7 +7,7 @@
 use crate::policy::CachePolicy;
 use std::time::SystemTime;
 use trillium_caching_headers::CachingHeadersExt;
-use trillium_client::{Conn, Headers, KnownHeaderName, Method, Status};
+use trillium_http::{Headers, KnownHeaderName, Method, Status};
 
 impl CachePolicy {
     /// RFC 9111 §4.2 + §4.3: decide what to do with a new request given
@@ -21,20 +21,20 @@ impl CachePolicy {
     ///   round-trip). The `matches` flag is `true` when the stored entry is the right one for this
     ///   request (vary signature matches); `false` means the handler should consider another stored
     ///   candidate or send an unconditional request.
-    pub fn before_request(&self, conn: &Conn, now: SystemTime) -> BeforeRequest {
-        let matches = self.vary_matches(conn.request_headers());
+    pub fn before_request(&self, request_headers: &Headers, now: SystemTime) -> BeforeRequest {
+        let matches = self.vary_matches(request_headers);
 
-        if matches && self.satisfies_without_revalidation(conn.request_headers(), now) {
+        if matches && self.satisfies_without_revalidation(request_headers, now) {
             // RFC 9111 §4.3.2 + RFC 9110 §13.2.2: a cache that can satisfy
             // the request from a stored response MUST evaluate the request's
             // conditional headers itself rather than serving the full body.
-            if self.inbound_conditional_matches(conn.request_headers()) {
+            if self.inbound_conditional_matches(request_headers) {
                 return BeforeRequest::NotModified(self.cached_response_304(now));
             }
             BeforeRequest::Fresh(self.cached_response(now))
         } else {
             BeforeRequest::Stale {
-                request_headers: self.revalidation_request_headers(conn),
+                request_headers: self.revalidation_request_headers(request_headers),
                 matches,
             }
         }
@@ -52,7 +52,10 @@ impl CachePolicy {
             return inm_matches(inm, self.response_headers.get_str(KnownHeaderName::Etag));
         }
         if let Some(ims) = request_headers.get_str(KnownHeaderName::IfModifiedSince) {
-            return ims_matches(ims, self.response_headers.get_str(KnownHeaderName::LastModified));
+            return ims_matches(
+                ims,
+                self.response_headers.get_str(KnownHeaderName::LastModified),
+            );
         }
         false
     }
@@ -159,8 +162,8 @@ impl CachePolicy {
     // the new incoming request. Carries forward the new request's
     // headers (minus hop-by-hop), then layers on validators derived
     // from the stored response's `ETag` / `Last-Modified`.
-    fn revalidation_request_headers(&self, conn: &Conn) -> Headers {
-        let mut headers = copy_without_hop_by_hop_headers(conn.request_headers());
+    fn revalidation_request_headers(&self, request_headers: &Headers) -> Headers {
+        let mut headers = copy_without_hop_by_hop_headers(request_headers);
 
         // We don't support partial responses; drop any range-validator
         // the caller might have set.
@@ -237,21 +240,23 @@ impl CachePolicy {
     /// RFC 9111 §3.2 + §4.3.4: integrate the origin's response to a
     /// revalidation request.
     ///
-    /// `conn` is the conn that just returned from the origin (carries
-    /// the new response state). `response_time` is the wall-clock time
-    /// of receipt.
+    /// The supplied `request_headers` / `new_status` / `new_response_headers` describe the
+    /// just-received origin response; `response_time` is the wall-clock time of receipt.
     ///
     /// Returns:
     /// - [`AfterResponse::NotModified`] if the origin returned 304 with validators matching this
     ///   stored entry. The handler should reuse the cached body and serve the returned
     ///   `CachedResponse` head. The included `CachePolicy` carries the merged stored+304 headers
     ///   and a refreshed `response_time`; replace the stored entry with it.
-    /// - [`AfterResponse::Modified`] otherwise. The handler should read the body off `conn` and
-    ///   serve it. Call [`CachePolicy::is_storable`] before persisting the new entry.
-    pub fn after_response(&self, conn: &Conn, response_time: SystemTime) -> AfterResponse {
-        let new_response_headers = conn.response_headers();
-        let new_status = conn.status().expect("response not yet received");
-
+    /// - [`AfterResponse::Modified`] otherwise. The handler should read the body off the origin
+    ///   response and serve it. Call [`CachePolicy::is_storable`] before persisting the new entry.
+    pub fn after_response(
+        &self,
+        request_headers: &Headers,
+        new_status: Status,
+        new_response_headers: &Headers,
+        response_time: SystemTime,
+    ) -> AfterResponse {
         // RFC 9111 §3.2: a 304 received in response to a conditional we
         // sent with our stored validators is, by construction, for that
         // stored entry — "the cache MAY treat any 304 (Not Modified)
@@ -273,15 +278,6 @@ impl CachePolicy {
         } else {
             (new_status, new_response_headers.clone())
         };
-
-        let new_policy = CachePolicy::from_parts(
-            self.request_method,
-            conn.request_headers(),
-            final_status,
-            final_response_headers,
-            response_time,
-            self.options,
-        );
 
         if entity_matches {
             let new_policy = CachePolicy::new(
@@ -315,7 +311,7 @@ fn merge_revalidation_headers(stored: &Headers, new: &Headers) -> Headers {
     out
 }
 
-fn is_excluded_from_revalidation_update(name: &trillium_client::HeaderName<'_>) -> bool {
+fn is_excluded_from_revalidation_update(name: &trillium_http::HeaderName<'_>) -> bool {
     name == KnownHeaderName::ContentLength
         || name == KnownHeaderName::ContentEncoding
         || name == KnownHeaderName::TransferEncoding
@@ -480,9 +476,9 @@ pub enum AfterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CachePolicy, test_helpers::*};
+    use crate::test_helpers::*;
     use std::time::Duration;
-    use trillium_client::KnownHeaderName::*;
+    use trillium_http::KnownHeaderName::*;
 
     // Fresh stored response, fresh request → Fresh, with Age inserted
     // and the origin's Date preserved.
@@ -498,10 +494,10 @@ mod tests {
                 (Etag, r#""abc""#),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[]);
 
-        match policy.before_request(&new, at(t0(), 100)) {
+        match before_request(&policy, &new, at(t0(), 100)) {
             BeforeRequest::Fresh(cached) => {
                 assert_eq!(cached.status, Status::Ok);
                 assert_eq!(cached.headers.get_str(Age), Some("100"));
@@ -526,10 +522,10 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""abc""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[]);
 
-        match policy.before_request(&new, at(t0(), 1000)) {
+        match before_request(&policy, &new, at(t0(), 1000)) {
             BeforeRequest::Stale {
                 request_headers,
                 matches,
@@ -552,10 +548,10 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (LastModified, &lm)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[]);
 
-        match policy.before_request(&new, at(t0(), 1000)) {
+        match before_request(&policy, &new, at(t0(), 1000)) {
             BeforeRequest::Stale {
                 request_headers, ..
             } => {
@@ -574,10 +570,10 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(AcceptEncoding, "br")]);
 
-        match policy.before_request(&new, t0()) {
+        match before_request(&policy, &new, t0()) {
             BeforeRequest::Stale { matches, .. } => assert!(!matches),
             other => panic!("expected Stale, got {other:?}"),
         }
@@ -592,11 +588,11 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(AcceptEncoding, "gzip")]);
 
         assert!(matches!(
-            policy.before_request(&new, t0()),
+            before_request(&policy, &new, t0()),
             BeforeRequest::Fresh(_)
         ));
     }
@@ -610,11 +606,11 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(CacheControl, "no-cache")]);
 
         assert!(matches!(
-            policy.before_request(&new, t0()),
+            before_request(&policy, &new, t0()),
             BeforeRequest::Stale { .. }
         ));
     }
@@ -629,11 +625,11 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(Pragma, "no-cache")]);
 
         assert!(matches!(
-            policy.before_request(&new, t0()),
+            before_request(&policy, &new, t0()),
             BeforeRequest::Stale { .. }
         ));
     }
@@ -647,12 +643,12 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         // Stored is 100s old; request demands at most 50s.
         let new = request(Method::Get, &[(CacheControl, "max-age=50")]);
 
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 100)),
+            before_request(&policy, &new, at(t0(), 100)),
             BeforeRequest::Stale { .. }
         ));
     }
@@ -666,12 +662,12 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         // 500s left; request demands 600.
         let new = request(Method::Get, &[(CacheControl, "min-fresh=600")]);
 
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 100)),
+            before_request(&policy, &new, at(t0(), 100)),
             BeforeRequest::Stale { .. }
         ));
     }
@@ -685,12 +681,12 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=100")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         // Response is now 50s past expiry (age=150, max_age=100).
         let new = request(Method::Get, &[(CacheControl, "max-stale=200")]);
 
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 150)),
+            before_request(&policy, &new, at(t0(), 150)),
             BeforeRequest::Fresh(_)
         ));
     }
@@ -704,11 +700,11 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=100, must-revalidate")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(CacheControl, "max-stale=200")]);
 
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 150)),
+            before_request(&policy, &new, at(t0(), 150)),
             BeforeRequest::Stale { .. }
         ));
     }
@@ -726,10 +722,10 @@ mod tests {
                 (TransferEncoding, "chunked"),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[]);
 
-        match policy.before_request(&new, t0()) {
+        match before_request(&policy, &new, t0()) {
             BeforeRequest::Fresh(cached) => {
                 assert!(!cached.headers.has_header(Connection));
                 assert!(!cached.headers.has_header(TransferEncoding));
@@ -753,10 +749,10 @@ mod tests {
                 .insert("x-custom-hop", "value".to_string());
             s
         };
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[]);
 
-        match policy.before_request(&new, t0()) {
+        match before_request(&policy, &new, t0()) {
             BeforeRequest::Fresh(cached) => {
                 assert!(!cached.headers.has_header("x-custom-hop"));
             }
@@ -776,7 +772,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""v1""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
 
         let revalidation = exchange(
             Method::Get,
@@ -785,7 +781,7 @@ mod tests {
             &[(Etag, r#""v1""#), (CacheControl, "max-age=600")],
         );
 
-        match policy.after_response(&revalidation, at(t0(), 100)) {
+        match after_response(&policy, &revalidation, at(t0(), 100)) {
             AfterResponse::NotModified(new_policy, cached) => {
                 assert_eq!(cached.status, Status::Ok);
                 // 304's Cache-Control replaces stored.
@@ -811,10 +807,10 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""v1""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let revalidation = exchange(Method::Get, &[], Status::NotModified, &[(Etag, r#""v2""#)]);
 
-        match policy.after_response(&revalidation, at(t0(), 100)) {
+        match after_response(&policy, &revalidation, at(t0(), 100)) {
             AfterResponse::NotModified(new_policy, _) => {
                 assert_eq!(
                     new_policy.response_headers.get_str(Etag),
@@ -835,7 +831,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#"W/"v1""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let revalidation = exchange(
             Method::Get,
             &[],
@@ -844,7 +840,7 @@ mod tests {
         );
 
         assert!(matches!(
-            policy.after_response(&revalidation, at(t0(), 100)),
+            after_response(&policy, &revalidation, at(t0(), 100)),
             AfterResponse::NotModified(..)
         ));
     }
@@ -859,7 +855,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (LastModified, &lm)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let revalidation = exchange(
             Method::Get,
             &[],
@@ -868,7 +864,7 @@ mod tests {
         );
 
         assert!(matches!(
-            policy.after_response(&revalidation, at(t0(), 100)),
+            after_response(&policy, &revalidation, at(t0(), 100)),
             AfterResponse::NotModified(..)
         ));
     }
@@ -884,13 +880,13 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""abcdef""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         // 304 with neither ETag nor Last-Modified — what the cache-tests
         // server (and any RFC-9110-compliant origin) is allowed to send.
         let revalidation = exchange(Method::Get, &[], Status::NotModified, &[]);
 
         assert!(matches!(
-            policy.after_response(&revalidation, at(t0(), 100)),
+            after_response(&policy, &revalidation, at(t0(), 100)),
             AfterResponse::NotModified(..)
         ));
     }
@@ -904,7 +900,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""v1""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let fresh = exchange(
             Method::Get,
             &[],
@@ -912,13 +908,10 @@ mod tests {
             &[(CacheControl, "max-age=600"), (Etag, r#""v2""#)],
         );
 
-        match policy.after_response(&fresh, at(t0(), 100)) {
-            AfterResponse::Modified(new_policy, cached) => {
-                assert_eq!(cached.status, Status::Ok);
-                assert_eq!(new_policy.response_headers.get_str(Etag), Some(r#""v2""#));
-            }
-            other => panic!("expected Modified, got {other:?}"),
-        }
+        assert!(matches!(
+            after_response(&policy, &fresh, at(t0(), 100)),
+            AfterResponse::Modified
+        ));
     }
 
     // §3.2: body-description headers from stored are preserved through
@@ -936,7 +929,7 @@ mod tests {
                 (ContentEncoding, "gzip"),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
 
         // 304 with different (lying) body headers and a new
         // non-body-description header.
@@ -952,7 +945,7 @@ mod tests {
             ],
         );
 
-        match policy.after_response(&revalidation, at(t0(), 100)) {
+        match after_response(&policy, &revalidation, at(t0(), 100)) {
             AfterResponse::NotModified(new_policy, _) => {
                 // Body headers stay from stored.
                 assert_eq!(
@@ -982,7 +975,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10"), (Etag, r#""v1""#)],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let revalidation = exchange(
             Method::Get,
             &[],
@@ -990,7 +983,7 @@ mod tests {
             &[(Etag, r#""v1""#), (Vary, "Accept-Encoding")],
         );
 
-        match policy.after_response(&revalidation, at(t0(), 100)) {
+        match after_response(&policy, &revalidation, at(t0(), 100)) {
             AfterResponse::NotModified(new_policy, _) => {
                 assert_eq!(
                     new_policy.response_headers.get_str(Vary),
@@ -1011,7 +1004,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=10")],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let revalidation = exchange(
             Method::Get,
             &[],
@@ -1020,7 +1013,7 @@ mod tests {
         );
 
         assert!(matches!(
-            policy.after_response(&revalidation, at(t0(), 100)),
+            after_response(&policy, &revalidation, at(t0(), 100)),
             AfterResponse::NotModified(..)
         ));
     }
@@ -1097,10 +1090,10 @@ mod tests {
                 (ContentType, "application/json"),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(Method::Get, &[(IfNoneMatch, r#""abcdef""#)]);
 
-        match policy.before_request(&new, at(t0(), 100)) {
+        match before_request(&policy, &new, at(t0(), 100)) {
             BeforeRequest::NotModified(cached) => {
                 assert_eq!(cached.status, Status::NotModified);
                 assert_eq!(cached.headers.get_str(Etag), Some(r#""abcdef""#));
@@ -1128,7 +1121,7 @@ mod tests {
                 (LastModified, "Thu, 01 Jan 1970 00:00:00 GMT"),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         // INM doesn't match (different etag); IMS would match. Per §13.1.4,
         // IMS is ignored → serve full body, not 304.
         let new = request(
@@ -1139,7 +1132,7 @@ mod tests {
             ],
         );
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 100)),
+            before_request(&policy, &new, at(t0(), 100)),
             BeforeRequest::Fresh(_)
         ));
     }
@@ -1156,13 +1149,13 @@ mod tests {
                 (LastModified, "Thu, 01 Jan 1970 00:00:00 GMT"),
             ],
         );
-        let policy = CachePolicy::new(&stored, t0(), private_cache());
+        let policy = policy_from(&stored, t0(), private_cache());
         let new = request(
             Method::Get,
             &[(IfModifiedSince, "Thu, 01 Jan 1970 00:00:01 GMT")],
         );
         assert!(matches!(
-            policy.before_request(&new, at(t0(), 100)),
+            before_request(&policy, &new, at(t0(), 100)),
             BeforeRequest::NotModified(_)
         ));
     }

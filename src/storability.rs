@@ -9,7 +9,7 @@ use crate::{
     policy::{CachePolicy, effective_response_cache_control},
 };
 use trillium_caching_headers::{CacheControlHeader, CachingHeadersExt};
-use trillium_client::{Conn, Headers, KnownHeaderName, Method, Status};
+use trillium_http::{Headers, KnownHeaderName, Method, Status};
 
 // RFC 9110 §15 / RFC 9111 §3: status codes that a cache may reuse without
 // any explicit expiration ("cacheable by default"). Other statuses can
@@ -50,20 +50,21 @@ pub(crate) fn response_has_explicit_expiration(
 impl CachePolicy {
     /// RFC 9111 §3 — *Storing Responses in Caches*.
     ///
-    /// Returns `true` if a cache MAY store the response carried on `conn`.
-    /// If `false`, the caller MUST NOT store anything for this exchange.
-    ///
-    /// `conn` is expected to be in the post-response state (i.e.
-    /// `conn.status()` is `Some`). Calling this on a conn whose response
-    /// has not yet arrived will panic.
-    pub fn is_storable(conn: &Conn, options: &CacheOptions) -> bool {
-        let request_cc = conn.request_headers().cache_control();
+    /// Returns `true` if a cache MAY store the response described by the supplied parts. If
+    /// `false`, the caller MUST NOT store anything for this exchange.
+    pub fn is_storable(
+        method: Method,
+        request_headers: &Headers,
+        status: Status,
+        response_headers: &Headers,
+        options: &CacheOptions,
+    ) -> bool {
+        let request_cc = request_headers.cache_control();
         // RFC 9213 §2.2: when a targeted field (CDN-Cache-Control on a shared
         // cache) is in effect, it fully replaces Cache-Control AND Expires
         // for caching policy decisions — including storability.
         let (response_cc, targeted_cc_in_effect) =
-            effective_response_cache_control(conn.response_headers(), options);
-        let status = conn.status().expect("response not yet received");
+            effective_response_cache_control(response_headers, options);
 
         // §5.2.1.5
         if request_cc.as_ref().is_some_and(|cc| cc.is_no_store()) {
@@ -71,12 +72,11 @@ impl CachePolicy {
         }
 
         // §3 (1) + §4.2.1
-        let method = conn.method();
         let method_ok = matches!(method, Method::Get | Method::Head)
             || (method == Method::Post
                 && response_has_explicit_expiration(
                     &response_cc,
-                    conn.response_headers(),
+                    response_headers,
                     options,
                     targeted_cc_in_effect,
                 ));
@@ -103,9 +103,7 @@ impl CachePolicy {
 
         // §3.5
         if options.shared
-            && conn
-                .request_headers()
-                .has_header(KnownHeaderName::Authorization)
+            && request_headers.has_header(KnownHeaderName::Authorization)
             && !response_cc
                 .as_ref()
                 .is_some_and(|cc| cc.must_revalidate() || cc.is_public() || cc.s_maxage().is_some())
@@ -114,7 +112,7 @@ impl CachePolicy {
         }
 
         // §3 (5) — Expires is ignored when a targeted field is in effect.
-        (!targeted_cc_in_effect && conn.response_headers().has_header(KnownHeaderName::Expires))
+        (!targeted_cc_in_effect && response_headers.has_header(KnownHeaderName::Expires))
             || response_cc.as_ref().is_some_and(|cc| {
                 cc.max_age().is_some()
                     || cc.is_public()
@@ -128,27 +126,27 @@ impl CachePolicy {
 mod tests {
     use super::*;
     use crate::test_helpers::*;
-    use trillium_client::KnownHeaderName::*;
+    use trillium_http::KnownHeaderName::*;
 
     // §5.2.1.5
     #[test]
     fn no_store_request_blocks_storage() {
         let conn = exchange(Method::Get, &[(CacheControl, "no-store")], Status::Ok, &[]);
-        assert!(!CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(!is_storable(&conn, &private_cache()));
     }
 
     // §5.2.2.5
     #[test]
     fn no_store_response_blocks_storage() {
         let conn = exchange(Method::Get, &[], Status::Ok, &[(CacheControl, "no-store")]);
-        assert!(!CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(!is_storable(&conn, &private_cache()));
     }
 
     // §3 (5): 200 is cacheable-by-default with no caching headers.
     #[test]
     fn cacheable_by_default_status_is_storable() {
         let conn = exchange(Method::Get, &[], Status::Ok, &[]);
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // §3 (5): 500 is not cacheable-by-default; without explicit freshness
@@ -156,7 +154,7 @@ mod tests {
     #[test]
     fn non_default_status_not_storable_without_freshness() {
         let conn = exchange(Method::Get, &[], Status::InternalServerError, &[]);
-        assert!(!CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(!is_storable(&conn, &private_cache()));
     }
 
     // §3 (5): non-default statuses (4xx/5xx) ARE storable when the response
@@ -169,7 +167,7 @@ mod tests {
             Status::InternalServerError,
             &[(CacheControl, "max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
 
         let conn = exchange(
             Method::Get,
@@ -177,14 +175,14 @@ mod tests {
             Status::BadRequest,
             &[(CacheControl, "max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // §3 (1): PUT is not a cacheable method.
     #[test]
     fn put_not_storable() {
         let conn = exchange(Method::Put, &[], Status::Ok, &[]);
-        assert!(!CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(!is_storable(&conn, &private_cache()));
     }
 
     // §4.2.1: POST with explicit expiration is storable.
@@ -196,14 +194,14 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // §4.2.1: POST without explicit expiration is not storable.
     #[test]
     fn post_without_expiration_not_storable() {
         let conn = exchange(Method::Post, &[], Status::Ok, &[]);
-        assert!(!CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(!is_storable(&conn, &private_cache()));
     }
 
     // §5.2.2.7
@@ -215,7 +213,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "private, max-age=600")],
         );
-        assert!(!CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(!is_storable(&conn, &shared_cache()));
     }
 
     #[test]
@@ -226,7 +224,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "private, max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // §3.5
@@ -238,7 +236,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        assert!(!CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(!is_storable(&conn, &shared_cache()));
     }
 
     #[test]
@@ -249,7 +247,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "public, max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(is_storable(&conn, &shared_cache()));
     }
 
     #[test]
@@ -260,7 +258,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "s-maxage=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(is_storable(&conn, &shared_cache()));
     }
 
     #[test]
@@ -271,7 +269,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "must-revalidate, max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(is_storable(&conn, &shared_cache()));
     }
 
     #[test]
@@ -282,7 +280,7 @@ mod tests {
             Status::Ok,
             &[(CacheControl, "max-age=600")],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // Pragma synthesis: a 200 with only Pragma: no-cache is still storable
@@ -291,7 +289,7 @@ mod tests {
     #[test]
     fn pragma_no_cache_does_not_block_storage() {
         let conn = exchange(Method::Get, &[], Status::Ok, &[(Pragma, "no-cache")]);
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 
     // ===== RFC 9213: targeted CDN-Cache-Control =====
@@ -309,7 +307,7 @@ mod tests {
                 (CdnCacheControl, "max-age=10000"),
             ],
         );
-        assert!(CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(is_storable(&conn, &shared_cache()));
     }
 
     // §2.2 inverse: CDN-CC=no-store overrides CC=max-age — CDN cache must
@@ -325,7 +323,7 @@ mod tests {
                 (CdnCacheControl, "no-store"),
             ],
         );
-        assert!(!CachePolicy::is_storable(&conn, &shared_cache()));
+        assert!(!is_storable(&conn, &shared_cache()));
     }
 
     // §2.2: private (non-shared) caches MUST ignore the targeted field.
@@ -342,6 +340,6 @@ mod tests {
                 (CdnCacheControl, "no-store"),
             ],
         );
-        assert!(CachePolicy::is_storable(&conn, &private_cache()));
+        assert!(is_storable(&conn, &private_cache()));
     }
 }

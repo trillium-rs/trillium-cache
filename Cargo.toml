@@ -9,13 +9,24 @@ readme = "README.md"
 keywords = ["trillium", "cache", "http"]
 categories = ["caching", "web-programming::http-client"]
 
+[package.metadata.cargo-udeps.ignore]
+development = ["trillium-cache"]
+
+[package.metadata.docs.rs]
+features = ["client"]
+
+[features]
+client = ["dep:trillium-client"]
+
 [dependencies]
 httpdate = "1.0.3"
 log = "0.4.29"
+trillium.workspace = true
 trillium-caching-headers.workspace = true
-trillium-client.workspace = true
+trillium-client = { workspace = true, optional = true }
+trillium-http.workspace = true
+url = "2.5.8"
 
 [dev-dependencies]
-trillium.workspace = true
-trillium-smol.workspace = true
+trillium-cache = { path = ".", features = ["client"] }
 trillium-testing.workspace = true

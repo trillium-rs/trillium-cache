@@ -1,6 +1,9 @@
 //! Shared test fixtures for the policy submodules.
 
-use crate::CacheOptions;
+use crate::{
+    CacheOptions, CachePolicy,
+    validation::{AfterResponse, BeforeRequest},
+};
 use std::time::{Duration, SystemTime};
 use trillium_client::{Client, Conn, KnownHeaderName, Method, Status};
 use trillium_testing::ServerConnector;
@@ -68,4 +71,48 @@ pub fn t0() -> SystemTime {
 
 pub fn at(t: SystemTime, secs: u64) -> SystemTime {
     t + Duration::from_secs(secs)
+}
+
+// Conn → raw-parts adapters: the policy module's primary API takes
+// `(method, request_headers, status, response_headers, ...)` so that it can
+// be driven from both client and server conns. The test harness still
+// composes exchanges via `trillium_client::Conn` for convenience; these
+// thin helpers feed those conns into the parts-shaped APIs.
+
+pub fn policy_from(conn: &Conn, response_time: SystemTime, options: CacheOptions) -> CachePolicy {
+    CachePolicy::new(
+        conn.method(),
+        conn.request_headers(),
+        conn.status().expect("response not yet received"),
+        conn.response_headers().clone(),
+        response_time,
+        options,
+    )
+}
+
+pub fn is_storable(conn: &Conn, options: &CacheOptions) -> bool {
+    CachePolicy::is_storable(
+        conn.method(),
+        conn.request_headers(),
+        conn.status().expect("response not yet received"),
+        conn.response_headers(),
+        options,
+    )
+}
+
+pub fn before_request(policy: &CachePolicy, conn: &Conn, now: SystemTime) -> BeforeRequest {
+    policy.before_request(conn.request_headers(), now)
+}
+
+pub fn after_response(
+    policy: &CachePolicy,
+    conn: &Conn,
+    response_time: SystemTime,
+) -> AfterResponse {
+    policy.after_response(
+        conn.request_headers(),
+        conn.status().expect("response not yet received"),
+        conn.response_headers(),
+        response_time,
+    )
 }

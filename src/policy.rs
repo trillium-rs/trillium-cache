@@ -13,7 +13,7 @@
 
 use std::time::{Duration, SystemTime};
 use trillium_caching_headers::{CacheControlDirective, CacheControlHeader, CachingHeadersExt};
-use trillium_client::{Conn, Headers, KnownHeaderName, Method, Status};
+use trillium_http::{Headers, KnownHeaderName, Method, Status};
 
 /// Resolve the effective response Cache-Control for a response, applying
 /// the RFC 9213 §2.2 targeted-field override:
@@ -53,10 +53,7 @@ fn looks_like_valid_sf_dictionary(s: &str) -> bool {
         if member.is_empty() {
             return false;
         }
-        let key = member
-            .split_once('=')
-            .map_or(member, |(k, _)| k)
-            .trim_end();
+        let key = member.split_once('=').map_or(member, |(k, _)| k).trim_end();
         is_valid_sf_key(key)
     })
 }
@@ -114,9 +111,12 @@ impl Default for CacheOptions {
 
 /// Captured snapshot of a request/response exchange.
 ///
-/// Built from a [`Conn`] in the post-response state via
-/// [`CachePolicy::new`]. Once stored, answers freshness / validation /
-/// revalidation questions about future requests for the same resource.
+/// `CachePolicy` is the value type that [`Cache`][crate::Cache] hands to
+/// a [`CacheStorage`][crate::CacheStorage] backend for storage and
+/// retrieval. To a storage backend it's an opaque blob: store it,
+/// return it on lookup, and use [`same_variant_as`][Self::same_variant_as]
+/// to decide whether a new entry replaces an existing one or appends as
+/// a new `Vary` variant.
 #[derive(Debug, Clone)]
 pub struct CachePolicy {
     pub(crate) request_method: Method,
@@ -139,22 +139,19 @@ pub struct CachePolicy {
 }
 
 impl CachePolicy {
-    /// Build a stored policy from a completed exchange. `response_time`
-    /// is the wall-clock time the response was received from the origin.
-    pub fn new(conn: &Conn, response_time: SystemTime, options: CacheOptions) -> Self {
-        Self::from_parts(
-            conn.method(),
-            conn.request_headers(),
-            conn.status().expect("response not yet received"),
-            conn.response_headers().clone(),
-            response_time,
-            options,
-        )
+    /// True when `other` would select the same stored variant as `self`
+    /// for the same [`CacheKey`][crate::CacheKey] — i.e. both responses
+    /// were captured with matching values for every header listed in
+    /// `Vary`. [`CacheStorage`][crate::CacheStorage] implementations use
+    /// this to decide whether a `put` should replace an existing variant
+    /// or append a new one.
+    pub fn same_variant_as(&self, other: &Self) -> bool {
+        self.vary_snapshot == other.vary_snapshot
     }
 
-    /// Build a policy from raw parts. Shared by `new` (post-response Conn
-    /// path) and `after_response` (post-revalidation merged-headers path).
-    pub(crate) fn from_parts(
+    // Build a stored policy from a completed exchange. `response_time` is the
+    // wall-clock time the response was received from the origin.
+    pub(crate) fn new(
         request_method: Method,
         request_headers: &Headers,
         response_status: Status,
@@ -223,7 +220,7 @@ fn build_vary_snapshot(
 mod tests {
     use super::*;
     use crate::test_helpers::*;
-    use trillium_client::KnownHeaderName::*;
+    use trillium_http::KnownHeaderName::*;
 
     // RFC 9110 §5.3: multiple `Vary:` lines fold to one comma-list.
     // `Headers::get_str` returns None for multi-value headers, so a naive
@@ -240,7 +237,7 @@ mod tests {
         // would replace, so we have to call append directly.
         conn.response_headers_mut().append(Vary, "Accept-Language");
 
-        let policy = CachePolicy::new(&conn, SystemTime::now(), private_cache());
+        let policy = policy_from(&conn, SystemTime::now(), private_cache());
         assert_eq!(
             policy.vary_snapshot,
             vec![
@@ -262,7 +259,7 @@ mod tests {
         );
         conn.response_headers_mut().append(Vary, "*");
 
-        let policy = CachePolicy::new(&conn, SystemTime::now(), private_cache());
+        let policy = policy_from(&conn, SystemTime::now(), private_cache());
         // The `*` survives flattening so vary_matches will return false.
         assert!(policy.vary_snapshot.iter().any(|(name, _)| name == "*"));
     }
@@ -275,7 +272,7 @@ mod tests {
             Status::Ok,
             &[(Vary, "Accept-Encoding, Accept-Language")],
         );
-        let policy = CachePolicy::new(&conn, SystemTime::now(), private_cache());
+        let policy = policy_from(&conn, SystemTime::now(), private_cache());
         assert_eq!(
             policy.vary_snapshot,
             vec![
@@ -313,7 +310,7 @@ mod tests {
     #[test]
     fn vary_snapshot_records_absent_request_header_as_none() {
         let conn = exchange(Method::Get, &[], Status::Ok, &[(Vary, "Accept-Encoding")]);
-        let policy = CachePolicy::new(&conn, SystemTime::now(), private_cache());
+        let policy = policy_from(&conn, SystemTime::now(), private_cache());
         assert_eq!(
             policy.vary_snapshot,
             vec![("accept-encoding".to_string(), None)]

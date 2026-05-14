@@ -1,16 +1,25 @@
-//! HTTP cache handler for trillium.rs.
+//! HTTP cache handler for Trillium, implementing [RFC 9111] semantics.
 //!
-//! This crate implements a client-side HTTP cache for use with
-//! [`trillium-client`][trillium_client]. The primary intended consumer is
-//! [`trillium-proxy`](https://docs.rs/trillium-proxy) (a shared cache in
-//! front of upstream origins), but it can also be used directly with
-//! `trillium-client` for any caching HTTP user agent.
+//! The primary form is a server handler — [`Cache`] sits before the handler whose responses
+//! should be cacheable, or in front of a [`trillium-proxy`](https://docs.rs/trillium-proxy)
+//! upstream for shared (CDN-style) caching. With the `client` feature enabled, the
+//! `client` module provides the same caching logic for a
+//! [`trillium-client`](https://docs.rs/trillium-client) user agent.
 //!
-//! Caching semantics follow [RFC 9111] including the
-//! `stale-while-revalidate` and `stale-if-error` extensions originally
-//! specified in [RFC 5861].
+//! See [`Cache::new`] for getting started on the server side.
 //!
-//! Status: work in progress.
+//! ## Features
+//!
+//! - `client` — exposes a `trillium-client` `ClientHandler` form of the cache for caching at the
+//!   user-agent layer.
+//!
+//! ## 0.1 status
+//!
+//! The server cache implements the bulk of RFC 9111: storability, freshness, conditional
+//! revalidation, `Vary`, unsafe-method invalidation, plus `stale-if-error` recovery from
+//! [RFC 5861]. The `stale-while-revalidate` directive is parsed but treated as synchronous
+//! revalidation in this release. The client handler supports the full set including
+//! background `stale-while-revalidate`.
 //!
 //! [RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
 //! [RFC 5861]: https://www.rfc-editor.org/rfc/rfc5861
@@ -29,16 +38,19 @@
 mod readme {}
 
 mod freshness;
-mod handler;
 mod policy;
+mod server;
 mod storability;
 mod storage;
 mod validation;
 
+#[cfg(feature = "client")]
+pub mod client;
+
 #[cfg(test)]
 mod test_helpers;
 
-pub use handler::{Cache, DEFAULT_MAX_CACHEABLE_SIZE};
 pub use policy::{CacheOptions, CachePolicy};
+pub use server::{Cache, DEFAULT_MAX_CACHEABLE_SIZE};
 pub use storage::{CacheEntry, CacheKey, CacheStorage, InMemoryStorage};
 pub use validation::{AfterResponse, BeforeRequest, CachedResponse};

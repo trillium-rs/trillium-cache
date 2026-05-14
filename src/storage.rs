@@ -12,7 +12,8 @@ use std::{
     fmt::{self, Debug, Display, Formatter},
     sync::RwLock,
 };
-use trillium_client::{Method, Url};
+use trillium_http::Method;
+use url::Url;
 
 /// Cache lookup key. Two responses share a key when they share method
 /// + URL; `Vary` distinguishes variants within the entry list.
@@ -167,7 +168,8 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use std::time::SystemTime;
-    use trillium_client::{Conn, KnownHeaderName::*, Status};
+    use trillium_client::Conn;
+    use trillium_http::{KnownHeaderName::*, Status};
     use trillium_testing::{TestResult, harness, test};
 
     fn key() -> CacheKey {
@@ -176,7 +178,7 @@ mod tests {
 
     fn entry_from(conn: &Conn, body: &[u8]) -> CacheEntry {
         CacheEntry::new(
-            CachePolicy::new(conn, SystemTime::now(), private_cache()),
+            policy_from(conn, SystemTime::now(), private_cache()),
             body.to_vec(),
         )
     }
