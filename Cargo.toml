@@ -22,10 +22,12 @@ client = ["dep:trillium-client"]
 fieldwork = "0.5.1"
 httpdate = "1.0.3"
 log = "0.4.29"
+futures-lite = "2.6.1"
+moka = { version = "0.12.15", features = ["future"] }
 trillium.workspace = true
 trillium-caching-headers.workspace = true
 trillium-client = { workspace = true, optional = true }
-trillium-http.workspace = true
+trillium-http = { workspace = true, features = ["unstable"] }
 url = "2.5.8"
 
 [dev-dependencies]

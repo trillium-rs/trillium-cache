@@ -15,20 +15,29 @@
 //! - `run` runs in declared order; the cache should be the last `run` so it can short-circuit the
 //!   network with a fresh hit.
 //! - `after_response` runs in reverse declared order; the cache should be the first
-//!   `after_response` so it can read the response body and replace it with a synthetic replay
-//!   before any other handler reads the (one-shot) network body.
+//!   `after_response` so it can read the response body and replace it with a streaming tee before
+//!   any other handler reads the (one-shot) network body.
+//!
+//! ## Streaming
+//!
+//! On miss, the cache installs a streaming tee between the origin response body and the
+//! user — bytes flow to storage and the user concurrently. Trailers propagate to both.
+//! The cap on stored body size is enforced mid-stream; if exceeded, the cache write is
+//! aborted and the remainder of the body passes through unmodified.
 
 use crate::{
-    AfterResponse, BeforeRequest, CacheEntry, CacheKey, CacheOptions, CachePolicy, CacheStorage,
+    CacheKey, CacheOptions, CachePolicy, CacheStorage, PutHandle, StoredEntry,
+    tee::TeeingReader,
+    validation::{AfterResponse, BeforeRequest},
 };
+use futures_lite::{AsyncReadExt, AsyncWriteExt};
 use std::{sync::Arc, time::SystemTime};
 use trillium_client::{
-    Client, ClientHandler, Conn, ConnExt, Headers, KnownHeaderName, Method, Result, Url,
+    Body, Client, ClientHandler, Conn, ConnExt, Headers, KnownHeaderName, Method, ResponseBody,
+    Result, Url,
 };
 
-/// Default cap on body bytes the cache will store. Larger responses
-/// pass through unmodified but are not cached.
-pub const DEFAULT_MAX_CACHEABLE_SIZE: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_CACHEABLE_SIZE: u64 = 16 * 1024 * 1024;
 
 /// Cache handler. Mount on a [`trillium_client::Client`] together with
 /// a [`CacheStorage`] backend.
@@ -39,7 +48,7 @@ pub const DEFAULT_MAX_CACHEABLE_SIZE: usize = 16 * 1024 * 1024;
 pub struct Cache<S: CacheStorage> {
     storage: Arc<S>,
     options: CacheOptions,
-    max_cacheable_size: usize,
+    max_cacheable_size: u64,
 }
 
 impl<S: CacheStorage> Clone for Cache<S> {
@@ -77,8 +86,10 @@ impl<S: CacheStorage> Cache<S> {
     }
 
     /// Set the cap on response body bytes the cache will store.
-    /// Responses larger than this pass through but are not stored.
-    pub fn with_max_cacheable_size(mut self, max: usize) -> Self {
+    /// Responses larger than this pass through but are not stored. If
+    /// the cap is exceeded mid-stream, the cache write is aborted and
+    /// the remainder of the body passes through unmodified.
+    pub fn with_max_cacheable_size(mut self, max: u64) -> Self {
         self.max_cacheable_size = max;
         self
     }
@@ -91,24 +102,34 @@ impl<S: CacheStorage> Cache<S> {
 
 // State stashed in the conn's typeset by `run` for `after_response` to
 // pick up.
-#[derive(Debug)]
-enum CacheCtx {
+enum CacheCtx<E: StoredEntry> {
     /// Cache hit — `run` already populated a synthetic response and
     /// halted. `after_response` is a no-op.
     Hit,
     /// Stored entry was stale and a conditional revalidation request
     /// has been spliced onto the conn. `after_response` reconciles the
     /// origin's reply (304 vs 200) with the stored entry.
-    Revalidation { stored: CacheEntry, key: CacheKey },
+    Revalidation { stored: E, key: CacheKey },
     /// Cache miss — no stored entry matched. If the response is
-    /// storable, `after_response` will buffer the body and store it.
+    /// storable, `after_response` will install a streaming tee.
     Miss { key: CacheKey },
     /// Unsafe method (POST/PUT/DELETE/...). On a non-error response,
     /// `after_response` invalidates the target URI per RFC 9111 §4.4.
-    /// We carry a `Url` rather than a `CacheKey` because invalidation
-    /// covers all cached methods (typically GET and HEAD), not just
-    /// the unsafe method's own key.
     Unsafe { url: Url },
+}
+
+impl<E: StoredEntry> std::fmt::Debug for CacheCtx<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hit => f.write_str("Hit"),
+            Self::Revalidation { key, .. } => f
+                .debug_struct("Revalidation")
+                .field("key", key)
+                .finish_non_exhaustive(),
+            Self::Miss { key } => f.debug_struct("Miss").field("key", key).finish(),
+            Self::Unsafe { url } => f.debug_struct("Unsafe").field("url", url).finish(),
+        }
+    }
 }
 
 impl<S: CacheStorage> ClientHandler for Cache<S> {
@@ -121,7 +142,7 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
         // possibly invalidate after the round-trip.
         if !method.is_safe() {
             log::trace!("cache: unsafe method {method}, bypassing cache read");
-            conn.insert_state(CacheCtx::Unsafe {
+            conn.insert_state(CacheCtx::<S::StoredEntry>::Unsafe {
                 url: conn.url().clone(),
             });
             return Ok(());
@@ -134,28 +155,32 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
         for entry in entries {
             match entry.policy().before_request(conn.request_headers(), now) {
                 BeforeRequest::Fresh(cached) => {
-                    // Apply cached response head; serve cached body;
-                    // halt to skip the network round-trip.
                     log::trace!("cache: hit (fresh) for {key}, serving cached response");
                     *conn.response_headers_mut() = cached.headers;
-                    let (_, body) = entry.into_parts();
+                    let body = match entry.open().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            log::warn!(
+                                "cache: open for hit failed for {key}: {e}, passing through"
+                            );
+                            // Reset the override; let the network round-trip happen.
+                            return Ok(());
+                        }
+                    };
                     conn.set_status(cached.status)
                         .set_response_body(body)
                         .halt()
-                        .insert_state(CacheCtx::Hit);
+                        .insert_state(CacheCtx::<S::StoredEntry>::Hit);
                     return Ok(());
                 }
 
                 BeforeRequest::NotModified(cached) => {
-                    // RFC 9111 §4.3.2 + RFC 9110 §13.2.2: client's
-                    // conditional already matches the cached entry. Send
-                    // 304 with stripped headers and no body.
                     log::trace!("cache: hit (fresh, conditional matches) for {key}, serving 304");
                     *conn.response_headers_mut() = cached.headers;
                     conn.set_status(cached.status)
                         .set_response_body(b"" as &[u8])
                         .halt()
-                        .insert_state(CacheCtx::Hit);
+                        .insert_state(CacheCtx::<S::StoredEntry>::Hit);
                     return Ok(());
                 }
 
@@ -171,21 +196,28 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                             "cache: stale-while-revalidate for {key}, serving stale + spawning \
                              background revalidation"
                         );
+                        let entry_for_bg = entry.clone();
                         self.spawn_background_revalidation(
                             conn,
-                            entry.clone(),
+                            entry_for_bg,
                             key.clone(),
                             request_headers,
                         );
-                        self.serve_stale(conn, entry, now);
-                        conn.halt();
-                        conn.insert_state(CacheCtx::Hit);
+                        match self.serve_stale(conn, entry, now).await {
+                            Ok(()) => {
+                                conn.halt();
+                                conn.insert_state(CacheCtx::<S::StoredEntry>::Hit);
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "cache: open for stale serve failed for {key}: {e}, passing \
+                                     through"
+                                );
+                            }
+                        }
                         return Ok(());
                     }
-                    // Otherwise fall through to synchronous
-                    // revalidation: splice conditional-revalidation
-                    // headers onto the outbound request; resolve in
-                    // `after_response`.
+                    // Otherwise fall through to synchronous revalidation.
                     log::trace!("cache: stale for {key}, sending conditional revalidation request");
                     *conn.request_headers_mut() = request_headers;
                     conn.insert_state(CacheCtx::Revalidation { stored: entry, key });
@@ -193,31 +225,25 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                 }
 
                 BeforeRequest::Stale { matches: false, .. } => {
-                    // Wrong vary signature; try the next stored
-                    // candidate.
                     log::trace!("cache: candidate vary-mismatch for {key}, trying next");
                     continue;
                 }
             }
         }
 
-        // No matching entry. Note the key so `after_response` can store
-        // a fresh response if it's cacheable.
         log::trace!("cache: miss for {key}, forwarding to origin");
-        conn.insert_state(CacheCtx::Miss { key });
+        conn.insert_state(CacheCtx::<S::StoredEntry>::Miss { key });
         Ok(())
     }
 
     async fn after_response(&self, conn: &mut Conn) -> Result<()> {
-        let Some(ctx) = conn.take_state::<CacheCtx>() else {
+        let Some(ctx) = conn.take_state::<CacheCtx<S::StoredEntry>>() else {
             log::trace!("cache: after_response with no CacheCtx, nothing to do");
             return Ok(());
         };
 
-        // RFC 9111 §4.2.4 stale-if-error path: if revalidation hit a
-        // transport-level failure or a 5xx, and the stored entry is
-        // SIE-eligible, serve it instead. Clear the error so the
-        // awaited conn returns Ok.
+        // RFC 9111 §4.2.4 / RFC 5861 stale-if-error: if revalidation hit a transport-level
+        // failure or a 5xx, and the stored entry is SIE-eligible, serve it instead.
         if let CacheCtx::Revalidation { ref stored, .. } = ctx {
             let now = SystemTime::now();
             let origin_failed =
@@ -228,15 +254,18 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                     conn.url(),
                     conn.status()
                 );
-                self.serve_stale(conn, stored.clone(), now);
+                if let Err(e) = self.serve_stale(conn, stored.clone(), now).await {
+                    log::warn!(
+                        "cache: open for stale serve failed for {}: {e}, propagating error",
+                        conn.url()
+                    );
+                    return Ok(());
+                }
                 conn.take_error();
                 return Ok(());
             }
         }
 
-        // Past the SIE recovery point. If transport failed and we
-        // didn't recover, leave the error in place for the caller to
-        // see.
         if conn.status().is_none() {
             log::trace!(
                 "cache: transport error with no SIE recovery for {}, propagating",
@@ -264,10 +293,6 @@ impl<S: CacheStorage> ClientHandler for Cache<S> {
                     );
                     self.invalidate_url(&url).await;
 
-                    // §4.4: also invalidate URIs from `Location` and
-                    // `Content-Location` response headers, but only when
-                    // their host matches the request URI's host (DoS
-                    // prevention, per the same paragraph).
                     for header in [KnownHeaderName::Location, KnownHeaderName::ContentLocation] {
                         let Some(value) = conn.response_headers().get_str(header) else {
                             continue;
@@ -319,14 +344,19 @@ impl<S: CacheStorage> Cache<S> {
 
     // RFC 9111 §4.2.4 / RFC 5861: apply a stored stale entry to the
     // conn as the served response. Used by both stale-while-revalidate
-    // (immediate serve, then revalidate in background) and
-    // stale-if-error (recovery on origin failure).
-    fn serve_stale(&self, conn: &mut Conn, stored: CacheEntry, now: SystemTime) {
+    // and stale-if-error paths.
+    async fn serve_stale(
+        &self,
+        conn: &mut Conn,
+        stored: S::StoredEntry,
+        now: SystemTime,
+    ) -> std::io::Result<()> {
         let cached = stored.policy().cached_response(now);
-        let (_, body) = stored.into_parts();
+        let body = stored.open().await?;
         conn.set_status(cached.status);
         *conn.response_headers_mut() = cached.headers;
         conn.set_response_body(body);
+        Ok(())
     }
 
     // RFC 9111 §4.2.4: spawn a background revalidation so the user gets
@@ -339,7 +369,7 @@ impl<S: CacheStorage> Cache<S> {
     fn spawn_background_revalidation(
         &self,
         conn: &Conn,
-        stored: CacheEntry,
+        stored: S::StoredEntry,
         key: CacheKey,
         request_headers: Headers,
     ) {
@@ -363,18 +393,13 @@ impl<S: CacheStorage> Cache<S> {
         method: Method,
         url: Url,
         request_headers: Headers,
-        stored: CacheEntry,
+        mut stored: S::StoredEntry,
         key: CacheKey,
     ) {
         let mut new_conn = client.build_conn(method, url);
         *new_conn.request_headers_mut() = request_headers;
 
         if let Err(e) = (&mut new_conn).await {
-            // Background revalidation failed at the transport level;
-            // leave the stored entry in place. Future requests in the
-            // SIE window will get the stale entry served, and outside
-            // the SWR/SIE windows they'll attempt synchronous
-            // revalidation again.
             log::trace!(
                 "cache: background revalidation transport error for {key} ({e}), leaving stored \
                  entry"
@@ -393,44 +418,57 @@ impl<S: CacheStorage> Cache<S> {
             now,
         ) {
             AfterResponse::NotModified(new_policy, _) => {
-                // 304 with matching validators: keep cached body,
-                // refresh headers + response_time.
                 log::trace!("cache: background revalidation 304 for {key}, refreshing entry");
-                let (_, body) = stored.into_parts();
-                self.storage
-                    .put(key, CacheEntry::new(new_policy, body))
-                    .await;
+                if let Err(e) = stored.refresh_policy(new_policy).await {
+                    log::warn!("cache: background refresh_policy failed for {key}: {e}");
+                }
             }
-            AfterResponse::Modified(new_policy, _) => {
-                let Ok(body) = new_conn.response_body().read_bytes().await else {
-                    log::trace!("cache: background revalidation read error for {key}, dropping");
-                    return;
-                };
-                let body_len = body.len();
-                if body_len > self.max_cacheable_size {
-                    log::trace!(
-                        "cache: background revalidation 200 for {key}, body {body_len} > max {}, \
-                         dropping",
-                        self.max_cacheable_size
-                    );
-                } else if !CachePolicy::is_storable(
-                    new_conn.method(),
-                    new_conn.request_headers(),
+            AfterResponse::Modified => {
+                let new_request_method = new_conn.method();
+                let new_request_headers = new_conn.request_headers().clone();
+                let new_response_headers = new_conn.response_headers().clone();
+                if !CachePolicy::is_storable(
+                    new_request_method,
+                    &new_request_headers,
                     new_status,
-                    new_conn.response_headers(),
+                    &new_response_headers,
                     &self.options,
                 ) {
                     log::trace!(
                         "cache: background revalidation 200 for {key}, response not storable, \
                          dropping"
                     );
-                } else {
+                    return;
+                }
+                let new_policy = CachePolicy::new(
+                    new_request_method,
+                    &new_request_headers,
+                    new_status,
+                    new_response_headers,
+                    now,
+                    self.options,
+                );
+                let put_handle = match self.storage.put(key.clone(), new_policy).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        log::warn!(
+                            "cache: background put({key}) failed: {e}, leaving stored entry"
+                        );
+                        return;
+                    }
+                };
+                let Some(body) = new_conn.take_response_body() else {
                     log::trace!(
-                        "cache: background revalidation 200 for {key}, storing {body_len} bytes"
+                        "cache: background revalidation 200 for {key}, no body, leaving stored \
+                         entry"
                     );
-                    self.storage
-                        .put(key, CacheEntry::new(new_policy, body))
-                        .await;
+                    return;
+                };
+                if let Err(e) = copy_into_storage(body, put_handle, self.max_cacheable_size).await {
+                    log::warn!(
+                        "cache: background copy into storage failed for {key}: {e}, leaving \
+                         stored entry"
+                    );
                 }
             }
         }
@@ -439,7 +477,7 @@ impl<S: CacheStorage> Cache<S> {
     async fn handle_revalidation(
         &self,
         conn: &mut Conn,
-        stored: CacheEntry,
+        mut stored: S::StoredEntry,
         key: CacheKey,
     ) -> Result<()> {
         let now = SystemTime::now();
@@ -451,54 +489,29 @@ impl<S: CacheStorage> Cache<S> {
             now,
         ) {
             AfterResponse::NotModified(new_policy, cached_response) => {
-                // 304 with matching validators: reuse stored body,
-                // apply merged head, refresh storage entry.
                 log::trace!(
                     "cache: revalidation 304 for {key}, reusing stored body and refreshing entry"
                 );
-                let (_, body) = stored.into_parts();
+                if let Err(e) = stored.refresh_policy(new_policy).await {
+                    log::warn!("cache: refresh_policy failed for {key}: {e}");
+                }
+                let body = match stored.open().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("cache: open after 304 failed for {key}: {e}, passing through");
+                        return Ok(());
+                    }
+                };
                 conn.set_status(cached_response.status);
                 *conn.response_headers_mut() = cached_response.headers;
-                conn.set_response_body(body.clone());
-                self.storage
-                    .put(key, CacheEntry::new(new_policy, body))
-                    .await;
+                conn.set_response_body(body);
                 Ok(())
             }
-            AfterResponse::Modified(new_policy, _) => {
-                // Origin returned a fresh body (or the validators
-                // didn't match). Capture it; restore as synthetic body
-                // for downstream consumers; persist if cacheable.
-                let body = take_response_body(conn).await?;
-                let body_len = body.len();
-                conn.set_response_body(body.clone());
-                if body_len > self.max_cacheable_size {
-                    log::trace!(
-                        "cache: revalidation 200 for {key}, body {body_len} > max {}, served but \
-                         not stored",
-                        self.max_cacheable_size
-                    );
-                } else if !CachePolicy::is_storable(
-                    conn.method(),
-                    conn.request_headers(),
-                    new_status,
-                    conn.response_headers(),
-                    &self.options,
-                ) {
-                    log::trace!(
-                        "cache: revalidation 200 for {key}, response not storable, served but not \
-                         stored"
-                    );
-                } else {
-                    log::trace!(
-                        "cache: revalidation 200 for {key}, replacing stored entry ({body_len} \
-                         bytes)"
-                    );
-                    self.storage
-                        .put(key, CacheEntry::new(new_policy, body))
-                        .await;
-                }
-                Ok(())
+            AfterResponse::Modified => {
+                // Drop the stored entry; treat as a fresh miss against the same key. The new
+                // entry replaces any stored variant with the same Vary signature.
+                drop(stored);
+                self.handle_miss(conn, key).await
             }
         }
     }
@@ -515,35 +528,78 @@ impl<S: CacheStorage> Cache<S> {
             log::trace!("cache: miss for {key}, response not storable, passing through");
             return Ok(());
         }
-        let body = take_response_body(conn).await?;
-        let body_len = body.len();
-        conn.set_response_body(body.clone());
-        if body_len > self.max_cacheable_size {
+
+        // Skip the put entirely when content-length is known and already over cap.
+        if let Some(len) = conn
+            .response_headers()
+            .get_str(KnownHeaderName::ContentLength)
+            .and_then(|s| s.parse::<u64>().ok())
+            && len > self.max_cacheable_size
+        {
             log::trace!(
-                "cache: miss for {key}, body {body_len} > max {}, served but not stored",
+                "cache: miss for {key}, body {len} > max {}, not caching",
                 self.max_cacheable_size
             );
-        } else {
-            log::trace!("cache: miss for {key}, storing {body_len} bytes");
-            let policy = CachePolicy::new(
-                conn.method(),
-                conn.request_headers(),
-                status,
-                conn.response_headers().clone(),
-                SystemTime::now(),
-                self.options,
-            );
-            self.storage.put(key, CacheEntry::new(policy, body)).await;
+            return Ok(());
         }
+
+        let policy = CachePolicy::new(
+            conn.method(),
+            conn.request_headers(),
+            status,
+            conn.response_headers().clone(),
+            SystemTime::now(),
+            self.options,
+        );
+        let put_handle = match self.storage.put(key.clone(), policy).await {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("cache: put({key}) failed: {e}, passing through");
+                return Ok(());
+            }
+        };
+
+        let Some(response_body) = conn.take_response_body() else {
+            log::trace!("cache: miss for {key}, no body, passing through");
+            return Ok(());
+        };
+        let len = response_body.content_length();
+        let upstream = Body::new_with_trailers(response_body, len);
+        log::trace!("cache: miss for {key}, streaming through tee");
+        let tee = TeeingReader::new(upstream, put_handle, self.max_cacheable_size);
+        conn.set_response_body(Body::new_with_trailers(tee, len));
         Ok(())
     }
 }
 
-// Read the response body off a conn. The conn's body source is
-// consumed; the caller should `set_response_body` with the returned
-// bytes to give downstream consumers a synthetic replay.
-async fn take_response_body(conn: &mut Conn) -> Result<Vec<u8>> {
-    conn.response_body().read_bytes().await
+// Copy a response body into a put handle, finalizing on EOF with whatever trailers the body
+// exposes. Used by background revalidation, where there's no concurrent user reader; the cap
+// is enforced by aborting when exceeded.
+async fn copy_into_storage<P: PutHandle>(
+    body: ResponseBody<'static>,
+    mut put: P,
+    cap: u64,
+) -> std::io::Result<()> {
+    let len = body.content_length();
+    let mut body = Body::new_with_trailers(body, len);
+    let mut buf = [0u8; 8192];
+    let mut total: u64 = 0;
+    loop {
+        let n = body.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > cap {
+            // Drop put_handle without finalizing — storage gets nothing.
+            drop(put);
+            log::trace!("cache: background copy exceeded cap {cap}, aborting cache write");
+            return Ok(());
+        }
+        put.write_all(&buf[..n]).await?;
+    }
+    let trailers = body.trailers();
+    put.finalize(trailers).await
 }
 
 #[cfg(test)]
@@ -584,7 +640,6 @@ mod tests {
         async fn run(&self, conn: ServerConn) -> ServerConn {
             let n = self.counter.fetch_add(1, Ordering::SeqCst);
 
-            // Conditional GET: return 304 when If-None-Match matches.
             if let Some(etag) = self.etag {
                 if conn.request_headers().get_str(KnownHeaderName::IfNoneMatch) == Some(etag) {
                     return conn
@@ -622,7 +677,6 @@ mod tests {
 
         let mut r2 = client.get("http://example.com/x").await?;
         assert_eq!(r2.status(), Some(Status::Ok));
-        // Cache hit: still body-0, not body-1.
         assert_eq!(r2.response_body().read_string().await?, "body-0");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "server only hit once");
         Ok(())
@@ -648,7 +702,6 @@ mod tests {
         assert_eq!(r1.response_body().read_string().await?, "body-0");
 
         let mut r2 = client.get("http://example.com/x").await?;
-        // Not cached; server saw the request again.
         assert_eq!(r2.response_body().read_string().await?, "body-1");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         Ok(())
@@ -658,26 +711,19 @@ mod tests {
     async fn post_invalidates_existing_entry() -> TestResult {
         let (client, counter) = cache_client(CountingServer::new("max-age=600"));
 
-        // Populate the cache.
         let mut r1 = client.get("http://example.com/x").await?;
         assert_eq!(r1.response_body().read_string().await?, "body-0");
 
-        // POST to the same URL → invalidate.
         let _ = client.post("http://example.com/x").await?;
 
-        // Subsequent GET re-fetches.
         let mut r3 = client.get("http://example.com/x").await?;
         assert_eq!(r3.response_body().read_string().await?, "body-2");
         assert_eq!(counter.load(Ordering::SeqCst), 3);
         Ok(())
     }
 
-    // §4.4: a successful unsafe response also invalidates entries for the
-    // URIs in its Location and Content-Location headers (same-host only).
     #[test(harness)]
     async fn post_invalidates_location_and_content_location_targets() -> TestResult {
-        // Server: GETs return a cacheable body; POSTs return Location and
-        // Content-Location pointing at sibling cacheable URLs.
         #[derive(Debug, Clone, Default)]
         struct LclServer(Arc<AtomicUsize>);
         impl ServerHandler for LclServer {
@@ -699,16 +745,15 @@ mod tests {
         let client = Client::new(ServerConnector::new(server))
             .with_handler(Cache::new(InMemoryStorage::new()));
 
-        // Populate cache for both Location and Content-Location targets.
-        let _ = client.get("http://example.com/loc").await?;
-        let _ = client.get("http://example.com/cl").await?;
+        // Read each body so the streaming tee actually commits to storage.
+        let mut loc = client.get("http://example.com/loc").await?;
+        let _ = loc.response_body().read_string().await?;
+        let mut cl = client.get("http://example.com/cl").await?;
+        let _ = cl.response_body().read_string().await?;
         assert_eq!(counter.load(Ordering::SeqCst), 2);
 
-        // Unsafe request whose response advertises both as side-effect
-        // targets — invalidation must extend to them.
         let _ = client.post("http://example.com/anything").await?;
 
-        // Subsequent GETs to the targets miss and re-fetch.
         let _ = client.get("http://example.com/loc").await?;
         let _ = client.get("http://example.com/cl").await?;
         assert_eq!(
@@ -719,8 +764,6 @@ mod tests {
         Ok(())
     }
 
-    // §4.4: cross-host Location/Content-Location values are NOT invalidated
-    // (DoS prevention).
     #[test(harness)]
     async fn cross_host_location_does_not_invalidate() -> TestResult {
         #[derive(Debug, Clone, Default)]
@@ -729,7 +772,6 @@ mod tests {
             async fn run(&self, conn: ServerConn) -> ServerConn {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if conn.method() == Method::Post {
-                    // Absolute URL on a different host.
                     conn.with_response_header(KnownHeaderName::Location, "http://other.example/loc")
                         .ok(format!("post-{n}"))
                 } else {
@@ -741,19 +783,17 @@ mod tests {
 
         let server = CrossHostServer::default();
         let counter = Arc::clone(&server.0);
-        // Single ServerConnector serves both hosts (the server doesn't care
-        // which host the URL points to; it just runs the handler).
         let client = Client::new(ServerConnector::new(server))
             .with_handler(Cache::new(InMemoryStorage::new()));
 
-        let _ = client.get("http://other.example/loc").await?;
+        // Read the body to drive the tee into storage. Streaming-cache contract: nothing is
+        // cached unless the body is read.
+        let mut populating = client.get("http://other.example/loc").await?;
+        let _ = populating.response_body().read_string().await?;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        // POST to a *different* host whose response Locations the cached URI.
-        // The host mismatch means we must not invalidate.
         let _ = client.post("http://example.com/anything").await?;
 
-        // The cached entry for other.example/loc is still intact.
         let mut r = client.get("http://other.example/loc").await?;
         assert_eq!(r.response_body().read_string().await?, "get-0");
         assert_eq!(
@@ -764,35 +804,23 @@ mod tests {
         Ok(())
     }
 
-    // §4.3 + §3.2: stored stale → revalidation → 304 → reuse cached body.
     #[test(harness)]
     async fn stale_with_etag_revalidates_to_304() -> TestResult {
-        // max-age=0 → immediately stale. Etag present → server can 304.
         let (client, counter) = cache_client(CountingServer::new("max-age=0").with_etag(r#""v1""#));
 
         let mut r1 = client.get("http://example.com/x").await?;
         assert_eq!(r1.response_body().read_string().await?, "body-0");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        // Stored is stale; revalidation goes out with If-None-Match.
-        // Server responds 304; cache reuses body-0.
         let mut r2 = client.get("http://example.com/x").await?;
         assert_eq!(r2.status(), Some(Status::Ok));
         assert_eq!(r2.response_body().read_string().await?, "body-0");
-        // Server saw 2 requests total (the original + the conditional).
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         Ok(())
     }
 
-    // §4.3.4: stored stale → revalidation → 200 → replace cached body.
     #[test(harness)]
     async fn stale_with_mismatching_etag_replaces_body() -> TestResult {
-        // Server etag changes per request would need state machinery;
-        // simplest version: server returns the current etag value but
-        // increments body counter. The conditional request's
-        // If-None-Match: "v1" matches the server's current etag → 304.
-        // To test the 200 path, we use a server that lies (always
-        // returns body, ignoring If-None-Match).
         #[derive(Debug, Clone)]
         struct AlwaysFresh {
             counter: Arc<AtomicUsize>,
@@ -815,20 +843,12 @@ mod tests {
         let mut r1 = client.get("http://example.com/x").await?;
         assert_eq!(r1.response_body().read_string().await?, "body-0");
 
-        // Origin returns 200 with same etag but different body — counts
-        // as Modified (validators match in our policy code: same etag →
-        // NotModified actually). Hmm — let me make etags differ.
-        // (Actually: the stored etag is "rolling", request sends
-        // If-None-Match: "rolling", server ignores it and returns 200
-        // with etag "rolling". Our policy sees: status != 304 →
-        // Modified.)
         let mut r2 = client.get("http://example.com/x").await?;
         assert_eq!(r2.response_body().read_string().await?, "body-1");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         Ok(())
     }
 
-    // §4.1: Vary header isolates entries by selecting headers.
     #[test(harness)]
     async fn vary_isolates_entries_by_request_header() -> TestResult {
         #[derive(Debug, Clone)]
@@ -861,14 +881,12 @@ mod tests {
             .await?;
         assert_eq!(r1.response_body().read_string().await?, "body-for-gzip");
 
-        // Different AE → cache miss, separate entry.
         let mut r2 = client
             .get("http://example.com/x")
             .with_request_header(KnownHeaderName::AcceptEncoding, "br")
             .await?;
         assert_eq!(r2.response_body().read_string().await?, "body-for-br");
 
-        // Same AE as r1 → cache hit.
         let mut r3 = client
             .get("http://example.com/x")
             .with_request_header(KnownHeaderName::AcceptEncoding, "gzip")
@@ -879,7 +897,6 @@ mod tests {
         Ok(())
     }
 
-    // Body over max_cacheable_size: served correctly, but not stored.
     #[test(harness)]
     async fn oversized_body_is_served_but_not_cached() -> TestResult {
         let server = CountingServer::new("max-age=600");
@@ -887,11 +904,9 @@ mod tests {
         let client = Client::new(ServerConnector::new(server))
             .with_handler(Cache::new(InMemoryStorage::new()).with_max_cacheable_size(3));
 
-        // "body-0" is 6 bytes — over our 3-byte cap.
         let mut r1 = client.get("http://example.com/x").await?;
         assert_eq!(r1.response_body().read_string().await?, "body-0");
 
-        // Not cached → server hit again on second request.
         let mut r2 = client.get("http://example.com/x").await?;
         assert_eq!(r2.response_body().read_string().await?, "body-1");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -956,9 +971,10 @@ mod tests {
         let policy =
             crate::test_helpers::policy_from(&conn, SystemTime::now(), CacheOptions::default());
         let key = CacheKey::new(Method::Get, "http://example.com/x".parse().unwrap());
-        storage
-            .put(key.clone(), CacheEntry::new(policy, body.to_vec()))
-            .await;
+        let mut handle = storage.put(key.clone(), policy).await.unwrap();
+        use futures_lite::AsyncWriteExt;
+        handle.write_all(body).await.unwrap();
+        handle.finalize(None).await.unwrap();
         key
     }
 
@@ -969,7 +985,6 @@ mod tests {
             populate_stale_entry(&storage, "max-age=0, stale-if-error=3600", b"stale body").await;
         let client = Client::new(FailingConnector::new()).with_handler(Cache::new(storage));
 
-        // Origin is unreachable, but stored entry is SIE-eligible.
         let mut conn = client.get("http://example.com/x").await?;
         assert_eq!(conn.status(), Some(Status::Ok));
         assert_eq!(conn.response_body().read_string().await?, "stale body");
@@ -995,7 +1010,6 @@ mod tests {
         let storage = InMemoryStorage::new();
         let _ =
             populate_stale_entry(&storage, "max-age=0, stale-if-error=3600", b"stale body").await;
-        // Origin returns 503 on every request.
         let server = ServerConnector::new(Status::ServiceUnavailable);
         let client = Client::new(server).with_handler(Cache::new(storage));
 
@@ -1013,7 +1027,6 @@ mod tests {
         let client = Client::new(server).with_handler(Cache::new(storage));
 
         let conn = client.get("http://example.com/x").await?;
-        // 5xx flows through to the user; cache does not recover.
         assert_eq!(conn.status(), Some(Status::ServiceUnavailable));
         Ok(())
     }
@@ -1036,13 +1049,10 @@ mod tests {
         let counter = server.counter.clone();
         let client = Client::new(ServerConnector::new(server)).with_handler(Cache::new(storage));
 
-        // User gets cached stale body immediately, NOT the server's
-        // body-0 response.
         let mut conn = client.get("http://example.com/x").await?;
         assert_eq!(conn.status(), Some(Status::Ok));
         assert_eq!(conn.response_body().read_string().await?, "stale-body");
 
-        // Wait for the spawned background revalidation to complete.
         let runtime = client.connector().runtime();
         for _ in 0..100 {
             if counter.load(Ordering::SeqCst) > 0 {
@@ -1056,19 +1066,28 @@ mod tests {
             "background revalidation should hit the origin"
         );
 
-        // Storage should now reflect the revalidated entry.
         let cache = client
             .downcast_handler::<Cache<InMemoryStorage>>()
             .expect("cache handler installed");
         let key = CacheKey::new(Method::Get, "http://example.com/x".parse().unwrap());
+        // Wait briefly for the background put to land in storage.
+        for _ in 0..100 {
+            if !cache.storage().get(&key).await.is_empty() {
+                break;
+            }
+            runtime.delay(Duration::from_millis(10)).await;
+        }
         let entries = cache.storage().get(&key).await;
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].body(), b"body-0");
+        let body = entries[0].clone().open().await.unwrap();
+        use futures_lite::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut body = body;
+        body.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"body-0");
         Ok(())
     }
 
-    // No `stale-while-revalidate` directive → falls back to
-    // synchronous revalidation.
     #[test(harness)]
     async fn no_swr_falls_back_to_synchronous_revalidation() -> TestResult {
         let storage = InMemoryStorage::new();
@@ -1078,16 +1097,12 @@ mod tests {
         let counter = server.counter.clone();
         let client = Client::new(ServerConnector::new(server)).with_handler(Cache::new(storage));
 
-        // No SWR window → user waits for revalidation; gets fresh body.
         let mut conn = client.get("http://example.com/x").await?;
         assert_eq!(conn.response_body().read_string().await?, "body-0");
-        // Server hit synchronously during the user's request.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
-    // must-revalidate disables SWR — falls back to synchronous
-    // revalidation even with stale-while-revalidate set.
     #[test(harness)]
     async fn must_revalidate_disables_swr() -> TestResult {
         let storage = InMemoryStorage::new();
@@ -1101,7 +1116,6 @@ mod tests {
         let server = CountingServer::new("max-age=600");
         let client = Client::new(ServerConnector::new(server)).with_handler(Cache::new(storage));
 
-        // must-revalidate forbids stale serving; user gets fresh body.
         let mut conn = client.get("http://example.com/x").await?;
         assert_eq!(conn.response_body().read_string().await?, "body-0");
         Ok(())

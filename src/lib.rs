@@ -21,6 +21,16 @@
 //! revalidation in this release. The client handler supports the full set including
 //! background `stale-while-revalidate`.
 //!
+//! ## Streaming
+//!
+//! Cacheable responses stream through the cache: bytes flow to storage and to the user
+//! concurrently as they arrive from the origin. Trailers propagate to both sides. The
+//! body-size cap is enforced mid-stream; if exceeded, the cache write is aborted and the
+//! remainder of the body passes through unchanged.
+//!
+//! The streaming contract is "we cache what you consume": if a caller drops a `Conn`
+//! without reading the response body, nothing is stored for that response.
+//!
 //! [RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
 //! [RFC 5861]: https://www.rfc-editor.org/rfc/rfc5861
 #![forbid(unsafe_code)]
@@ -38,10 +48,12 @@
 mod readme {}
 
 mod freshness;
+mod memory;
 mod policy;
 mod server;
 mod storability;
 mod storage;
+mod tee;
 mod validation;
 
 #[cfg(feature = "client")]
@@ -50,7 +62,7 @@ pub mod client;
 #[cfg(test)]
 mod test_helpers;
 
+pub use memory::{InMemoryEntry, InMemoryPutHandle, InMemoryStorage};
 pub use policy::{CacheOptions, CachePolicy};
 pub use server::Cache;
-pub use storage::{CacheEntry, CacheKey, CacheStorage, InMemoryStorage};
-pub use validation::{AfterResponse, BeforeRequest, CachedResponse};
+pub use storage::{CacheKey, CacheStorage, PutHandle, StoredEntry};

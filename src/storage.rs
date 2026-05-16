@@ -1,19 +1,41 @@
-//! Cache storage trait and an unbounded in-memory implementation.
+//! Cache storage trait.
 //!
 //! [`CacheStorage`] is the persistence boundary for a cache: lookup,
-//! insert, and invalidate, all keyed by [`CacheKey`] (URL + method).
-//! A key may hold multiple entries — one per `Vary` signature — and
-//! `get` returns the full list under a key. Picking the right entry for
-//! a given request is the caller's job, via
-//! [`CachePolicy::before_request`].
+//! streaming insert, and invalidate, all keyed by [`CacheKey`] (URL +
+//! method). A key may hold multiple entries — one per `Vary` signature
+//! — and [`get`] returns the full list under a key. [`CachePolicy`] is
+//! opaque to storage backends; use
+//! [`CachePolicy::same_variant_as`] to dedupe by `Vary` signature when
+//! finalizing an insert.
+//!
+//! ## Streaming
+//!
+//! [`put`] returns a [`PutHandle`] — an [`AsyncWrite`] sink the handler
+//! writes body bytes into as they arrive from the origin. On EOF the
+//! handler calls [`PutHandle::finalize`] with any trailers from the
+//! body source. Dropping a `PutHandle` without finalizing aborts the
+//! store; the partial data is discarded.
+//!
+//! On hit, [`StoredEntry::open`] returns a [`Body`] for replay. The
+//! entry's stored trailers (if any) are attached to the returned Body
+//! via [`Body::new_with_trailers`], so consumers see them by calling
+//! [`Body::trailers`] / [`BodySource::trailers`] on the response body
+//! after reaching EOF.
+//!
+//! [`get`]: CacheStorage::get
+//! [`put`]: CacheStorage::put
+//! [`AsyncWrite`]: futures_lite::AsyncWrite
+//! [`Body::new_with_trailers`]: trillium_http::Body::new_with_trailers
+//! [`Body::trailers`]: trillium_http::Body::trailers
+//! [`BodySource::trailers`]: trillium_http::BodySource::trailers
 
 use crate::CachePolicy;
+use futures_lite::AsyncWrite;
 use std::{
-    collections::HashMap,
     fmt::{self, Debug, Display, Formatter},
-    sync::RwLock,
+    io,
 };
-use trillium_http::Method;
+use trillium_http::{Body, Headers, Method};
 use url::Url;
 
 /// Cache lookup key. Two responses share a key when they share method
@@ -55,223 +77,94 @@ impl CacheKey {
     }
 }
 
-/// One stored response: the [`CachePolicy`] (headers + freshness
-/// state) plus the response body bytes.
-#[derive(Debug, Clone)]
-pub struct CacheEntry {
-    policy: CachePolicy,
-    body: Vec<u8>,
-}
-
-impl CacheEntry {
-    /// Construct a cache entry.
-    pub fn new(policy: CachePolicy, body: Vec<u8>) -> Self {
-        Self { policy, body }
-    }
-
-    /// The stored policy.
-    pub fn policy(&self) -> &CachePolicy {
-        &self.policy
-    }
-
-    /// The stored response body.
-    pub fn body(&self) -> &[u8] {
-        &self.body
-    }
-
-    /// Decompose this entry into its policy and body, consuming the
-    /// entry.
-    pub fn into_parts(self) -> (CachePolicy, Vec<u8>) {
-        (self.policy, self.body)
-    }
-}
-
 /// Storage backend for cached responses.
 ///
-/// A key may carry multiple entries, one per `Vary` signature. `get`
-/// returns the full list under a key; the caller chooses among them via
-/// [`CachePolicy::before_request`].
+/// A key may carry multiple entries, one per `Vary` signature. [`get`]
+/// returns the full list under a key; the cache handler picks among
+/// them internally.
+///
+/// Writes are streaming — [`put`] returns a [`PutHandle`] that the
+/// caller writes bytes into as they arrive. The handler signals end-of-
+/// stream by calling [`PutHandle::finalize`]; dropping the handle
+/// without finalizing aborts the write.
+///
+/// [`get`]: CacheStorage::get
+/// [`put`]: CacheStorage::put
 pub trait CacheStorage: Debug + Send + Sync + 'static {
+    /// Concrete entry type returned by [`get`][Self::get].
+    type StoredEntry: StoredEntry;
+
+    /// Streaming writer returned by [`put`][Self::put].
+    type PutHandle: PutHandle;
+
     /// Fetch all entries stored under `key`. Returns an empty vec when
     /// the key has no entries.
-    fn get(&self, key: &CacheKey) -> impl Future<Output = Vec<CacheEntry>> + Send;
+    fn get(&self, key: &CacheKey) -> impl Future<Output = Vec<Self::StoredEntry>> + Send;
 
-    /// Insert (or replace) an entry under `key`. If an existing entry
-    /// has the same `Vary` signature, it is replaced; otherwise the
-    /// new entry is appended.
-    fn put(&self, key: CacheKey, entry: CacheEntry) -> impl Future<Output = ()> + Send;
+    /// Open a streaming insert for `key` with the supplied policy.
+    /// Returns a [`PutHandle`] that the caller writes body bytes into,
+    /// then closes with [`PutHandle::finalize`]. If an existing entry
+    /// has the same `Vary` signature, finalize replaces it; otherwise
+    /// the new entry is appended.
+    ///
+    /// Returning `Err` aborts the cache write — the caller passes the
+    /// origin response through to the user but does not cache it.
+    fn put(
+        &self,
+        key: CacheKey,
+        policy: CachePolicy,
+    ) -> impl Future<Output = io::Result<Self::PutHandle>> + Send;
 
     /// Remove all entries stored under `key`.
     fn invalidate(&self, key: &CacheKey) -> impl Future<Output = ()> + Send;
 }
 
-/// Unbounded in-memory cache storage backed by a [`HashMap`].
+/// One stored response.
 ///
-/// **Memory grows without bound.** Put requests with the same
-/// `(URL, method, Vary)` triple replace older entries, but distinct
-/// Vary signatures and distinct keys accumulate forever. Suitable for
-/// tests and short-lived processes; production workloads need a
-/// size-aware backend.
-#[derive(Debug, Default)]
-pub struct InMemoryStorage {
-    entries: RwLock<HashMap<CacheKey, Vec<CacheEntry>>>,
+/// Returned by [`CacheStorage::get`]. Cheap to hold and pass around —
+/// in-memory backends share underlying buffers via [`Arc`][std::sync::Arc],
+/// and other backends typically hold only metadata until
+/// [`open`][Self::open] is called. The [`Clone`] bound supports the cache
+/// handler's stale-while-revalidate flow, which needs one handle to serve
+/// the stale entry to the user and another to drive background
+/// revalidation; for typical backends `clone` is a cheap pointer copy.
+pub trait StoredEntry: Clone + Debug + Send + Sync + 'static {
+    /// Borrow the [`CachePolicy`] this entry was stored with.
+    fn policy(&self) -> &CachePolicy;
+
+    /// Replace the stored policy without rewriting the body.
+    ///
+    /// Used on a successful 304 revalidation (RFC 9111 §3.2) to refresh
+    /// validators and freshness directives while keeping the previously
+    /// stored body bytes. The supplied policy carries the merged
+    /// stored+304 headers and a fresh `response_time`.
+    fn refresh_policy(
+        &mut self,
+        new_policy: CachePolicy,
+    ) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// Open the stored response body for replay.
+    ///
+    /// Consumes the entry and returns a [`Body`] that yields the stored
+    /// bytes when read. If trailers were captured on store, they are
+    /// attached via [`Body::new_with_trailers`] and surface to readers
+    /// after EOF via [`BodySource::trailers`][trillium_http::BodySource::trailers].
+    fn open(self) -> impl Future<Output = io::Result<Body>> + Send;
 }
 
-impl InMemoryStorage {
-    /// Construct an empty in-memory storage.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Total number of stored entries across all keys.
-    pub fn len(&self) -> usize {
-        self.entries.read().unwrap().values().map(Vec::len).sum()
-    }
-
-    /// `true` if no entries are stored.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl CacheStorage for InMemoryStorage {
-    async fn get(&self, key: &CacheKey) -> Vec<CacheEntry> {
-        self.entries
-            .read()
-            .unwrap()
-            .get(key)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    async fn put(&self, key: CacheKey, entry: CacheEntry) {
-        let mut map = self.entries.write().unwrap();
-        let bucket = map.entry(key).or_default();
-        let new_snapshot = entry.policy.vary_snapshot.clone();
-        bucket.retain(|e| e.policy.vary_snapshot != new_snapshot);
-        bucket.push(entry);
-    }
-
-    async fn invalidate(&self, key: &CacheKey) {
-        self.entries.write().unwrap().remove(key);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_helpers::*;
-    use std::time::SystemTime;
-    use trillium_client::Conn;
-    use trillium_http::{KnownHeaderName::*, Status};
-    use trillium_testing::{TestResult, harness, test};
-
-    fn key() -> CacheKey {
-        CacheKey::new(Method::Get, "http://example.com/".parse().unwrap())
-    }
-
-    fn entry_from(conn: &Conn, body: &[u8]) -> CacheEntry {
-        CacheEntry::new(
-            policy_from(conn, SystemTime::now(), private_cache()),
-            body.to_vec(),
-        )
-    }
-
-    #[test(harness)]
-    async fn get_missing_key_returns_empty() -> TestResult {
-        let storage = InMemoryStorage::new();
-        assert!(storage.get(&key()).await.is_empty());
-        Ok(())
-    }
-
-    #[test(harness)]
-    async fn put_then_get_returns_entry() -> TestResult {
-        let storage = InMemoryStorage::new();
-        let conn = exchange(
-            Method::Get,
-            &[],
-            Status::Ok,
-            &[(CacheControl, "max-age=600")],
-        );
-        storage.put(key(), entry_from(&conn, b"hello")).await;
-        let result = storage.get(&key()).await;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].body(), b"hello");
-        Ok(())
-    }
-
-    #[test(harness)]
-    async fn put_with_same_vary_replaces() -> TestResult {
-        let storage = InMemoryStorage::new();
-        let conn = exchange(
-            Method::Get,
-            &[(AcceptEncoding, "gzip")],
-            Status::Ok,
-            &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
-        );
-        storage.put(key(), entry_from(&conn, b"v1")).await;
-        storage.put(key(), entry_from(&conn, b"v2")).await;
-        let result = storage.get(&key()).await;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].body(), b"v2");
-        Ok(())
-    }
-
-    #[test(harness)]
-    async fn put_with_different_vary_appends() -> TestResult {
-        let storage = InMemoryStorage::new();
-        let gzip = exchange(
-            Method::Get,
-            &[(AcceptEncoding, "gzip")],
-            Status::Ok,
-            &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
-        );
-        let br = exchange(
-            Method::Get,
-            &[(AcceptEncoding, "br")],
-            Status::Ok,
-            &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
-        );
-        storage.put(key(), entry_from(&gzip, b"gz")).await;
-        storage.put(key(), entry_from(&br, b"br")).await;
-        let result = storage.get(&key()).await;
-        assert_eq!(result.len(), 2);
-        Ok(())
-    }
-
-    #[test(harness)]
-    async fn invalidate_removes_all_entries_for_key() -> TestResult {
-        let storage = InMemoryStorage::new();
-        let conn = exchange(
-            Method::Get,
-            &[],
-            Status::Ok,
-            &[(CacheControl, "max-age=600")],
-        );
-        storage.put(key(), entry_from(&conn, b"x")).await;
-        assert_eq!(storage.len(), 1);
-        storage.invalidate(&key()).await;
-        assert!(storage.get(&key()).await.is_empty());
-        assert!(storage.is_empty());
-        Ok(())
-    }
-
-    #[test(harness)]
-    async fn invalidate_does_not_touch_other_keys() -> TestResult {
-        let storage = InMemoryStorage::new();
-        let conn = exchange(
-            Method::Get,
-            &[],
-            Status::Ok,
-            &[(CacheControl, "max-age=600")],
-        );
-        let key_a = CacheKey::new(Method::Get, "http://a.example/".parse().unwrap());
-        let key_b = CacheKey::new(Method::Get, "http://b.example/".parse().unwrap());
-        storage.put(key_a.clone(), entry_from(&conn, b"a")).await;
-        storage.put(key_b.clone(), entry_from(&conn, b"b")).await;
-        storage.invalidate(&key_a).await;
-        assert!(storage.get(&key_a).await.is_empty());
-        assert_eq!(storage.get(&key_b).await.len(), 1);
-        Ok(())
-    }
+/// Streaming writer returned by [`CacheStorage::put`].
+///
+/// Write body bytes via the [`AsyncWrite`] impl, then call
+/// [`finalize`][Self::finalize] once the body is fully consumed.
+/// Dropping a `PutHandle` without finalizing aborts the write; partial
+/// data MUST NOT be exposed by a subsequent [`CacheStorage::get`].
+pub trait PutHandle: AsyncWrite + Send + Unpin + 'static {
+    /// Commit the buffered bytes to storage with any trailers from the
+    /// body source.
+    ///
+    /// `trailers` is `Some` when the body source produced a trailers
+    /// section (a `BodySource` whose `trailers()` returned `Some`
+    /// after EOF), `None` otherwise — distinguishing "no trailers
+    /// section" from "empty trailers section."
+    fn finalize(self, trailers: Option<Headers>) -> impl Future<Output = io::Result<()>> + Send;
 }
