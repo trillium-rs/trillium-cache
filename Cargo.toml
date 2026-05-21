@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "http cache handler for trillium.rs"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/trillium-rs/trillium"
+repository = "https://github.com/trillium-rs/trillium-cache"
 readme = "README.md"
 keywords = ["trillium", "cache", "http"]
 categories = ["caching", "web-programming::http-client"]
@@ -19,17 +19,18 @@ features = ["client"]
 client = ["dep:trillium-client"]
 
 [dependencies]
-fieldwork = "0.5.1"
+fieldwork = "0.5.2"
 httpdate = "1.0.3"
 log = "0.4.29"
 futures-lite = "2.6.1"
 moka = { version = "0.12.15", features = ["future"] }
-trillium.workspace = true
-trillium-caching-headers.workspace = true
-trillium-client = { workspace = true, optional = true }
-trillium-http = { workspace = true, features = ["unstable"] }
+trillium = "1"
+trillium-caching-headers = "0.4"
+trillium-client = { version = "0.9", optional = true }
+trillium-http = { version = "1", features = ["unstable"] }
 url = "2.5.8"
 
 [dev-dependencies]
 trillium-cache = { path = ".", features = ["client"] }
-trillium-testing.workspace = true
+trillium-testing = "0.10"
+

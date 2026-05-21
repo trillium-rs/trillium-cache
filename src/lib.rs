@@ -21,20 +21,11 @@
 //! revalidation in this release. The client handler supports the full set including
 //! background `stale-while-revalidate`.
 //!
-//! ## Streaming
-//!
-//! Cacheable responses stream through the cache: bytes flow to storage and to the user
-//! concurrently as they arrive from the origin. Trailers propagate to both sides. The
-//! body-size cap is enforced mid-stream; if exceeded, the cache write is aborted and the
-//! remainder of the body passes through unchanged.
-//!
-//! The streaming contract is "we cache what you consume": if a caller drops a `Conn`
-//! without reading the response body, nothing is stored for that response.
-//!
 //! [RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
 //! [RFC 5861]: https://www.rfc-editor.org/rfc/rfc5861
 #![forbid(unsafe_code)]
 #![deny(
+    clippy::dbg_macro,
     missing_copy_implementations,
     rustdoc::missing_crate_level_docs,
     missing_debug_implementations,
@@ -43,7 +34,7 @@
     unused_qualifications
 )]
 
-#[cfg(test)]
+#[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 mod readme {}
 

@@ -3,15 +3,18 @@
 [![ci][ci-badge]][ci]
 [![crates.io version][version-badge]][crate]
 [![docs.rs][docs-badge]][docs]
+[![codecov][codecov-badge]][codecov]
 
-[ci]: https://github.com/trillium-rs/trillium/actions?query=workflow%3ACI
-[ci-badge]: https://github.com/trillium-rs/trillium/workflows/CI/badge.svg
+[ci]: https://github.com/trillium-rs/trillium-cache/actions?query=workflow%3ACI
+[ci-badge]: https://github.com/trillium-rs/trillium-cache/workflows/CI/badge.svg
 [version-badge]: https://img.shields.io/crates/v/trillium-cache.svg?style=flat-square
 [crate]: https://crates.io/crates/trillium-cache
 [docs-badge]: https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square
 [docs]: https://docs.rs/trillium-cache
+[codecov-badge]: https://codecov.io/gh/trillium-rs/trillium-cache/graph/badge.svg
+[codecov]: https://codecov.io/gh/trillium-rs/trillium-cache
 
-An [RFC 9111] HTTP cache for Trillium. The primary form is a server handler — place it before the handler whose responses you want to cache, or in front of a `trillium-proxy` upstream for shared (CDN-style) caching. With the `client` feature enabled, the same caching logic is also available as a [`trillium-client`](https://docs.rs/trillium-client) handler.
+An [RFC 9111] HTTP cache for trillium and trillium-client.
 
 ## Example
 
