@@ -21,17 +21,17 @@
 //! response body propagate to both sides. Dropping the response body before EOF aborts the
 //! cache write — the partial bytes are discarded.
 //!
-//! ## Stale-while-revalidate not currently implemented
+//! ## Stale-while-revalidate
 //!
-//! This handler does not yet implement `stale-while-revalidate`. A stale entry within its
-//! `stale-while-revalidate` window will fall through to synchronous revalidation (the inner
+//! This handler does not implement background `stale-while-revalidate`. A stale entry within
+//! its `stale-while-revalidate` window falls through to synchronous revalidation (the inner
 //! handler runs while the request is in flight). `stale-if-error` recovery *is* supported:
 //! when the downstream handler produces a 5xx and the stored entry is SIE-eligible, the
 //! cache serves the stored entry instead.
 //!
 //! For background `stale-while-revalidate`, use the client-side handler (gated on the
-//! `client` feature) in front of a [`trillium-proxy`](https://docs.rs/trillium-proxy)
-//! upstream.
+//! `client` feature) on the client a [`trillium-proxy`](https://docs.rs/trillium-proxy) uses
+//! to reach its upstream.
 
 use crate::{
     CacheKey, CacheOptions, CachePolicy, CacheStorage, StoredEntry,

@@ -6,12 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Initial release. HTTP cache handler for Trillium implementing RFC 9111 semantics, with
-both a server handler (place in front of a producer or a `trillium-proxy` upstream) and
-— with the optional `client` cargo feature — a `ClientHandler` for caching at the
-`trillium-client` user-agent layer. `stale-if-error` is supported on both sides;
-background `stale-while-revalidate` is supported on the client and falls back to
-synchronous revalidation on the server in this release.
+Initial release. An RFC 9111 HTTP cache for trillium in two handler forms that share one
+caching engine. With the optional `client` cargo feature, a `trillium-client` handler caches
+at the user-agent layer; mounted on the client a `trillium-proxy` uses to reach its upstream,
+it gives you a shared, CDN-style cache in front of the origin. A server handler caches a
+trillium handler's own responses. `stale-if-error` is supported on both sides; background
+`stale-while-revalidate` is supported on the client and falls back to synchronous
+revalidation on the server in this release.
 
 Bodies stream through the cache rather than being buffered: as bytes arrive from the
 origin they flow to storage and to the user concurrently via a teeing reader. Trailers

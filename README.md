@@ -14,9 +14,31 @@
 [codecov-badge]: https://codecov.io/gh/trillium-rs/trillium-cache/graph/badge.svg
 [codecov]: https://codecov.io/gh/trillium-rs/trillium-cache
 
-An [RFC 9111] HTTP cache for trillium and trillium-client.
+An [RFC 9111] HTTP cache for trillium, in two handler forms that share one caching engine.
+
+The primary form is a [`trillium-client`](https://docs.rs/trillium-client) handler (the `client` feature). Add it to your client to cache at the user-agent layer; mark it `.shared()` for shared-cache (proxy/CDN) semantics. The server form caches a trillium handler's own responses.
 
 ## Example
+
+The client handler, with shared-cache semantics:
+
+```rust,no_run
+use trillium_cache::{client::Cache, InMemoryStorage};
+use trillium_client::Client;
+use trillium_smol::ClientConfig;
+
+let client = Client::from(ClientConfig::new())
+    .with_handler(Cache::new(InMemoryStorage::new()).shared());
+```
+
+Hand that client to [`trillium-proxy`](https://docs.rs/trillium-proxy) as its upstream client and the proxy becomes a shared, CDN-style cache in front of the origin:
+
+```rust,ignore
+let proxy = Proxy::new(client, "http://origin.example")
+    .with_via_pseudonym("trillium-proxy");
+```
+
+The server form caches a trillium handler's own responses — place `Cache` before the handler whose responses you want cached:
 
 ```rust,no_run
 use trillium::Conn;
@@ -31,17 +53,9 @@ let app = (
 // trillium_smol::run(app);
 ```
 
-For a shared cache (proxy/CDN per [RFC 9111] §1.2.1), enable shared-cache semantics with `.shared()` and place it in front of your upstream handler:
-
-```rust,no_run
-use trillium_cache::{Cache, InMemoryStorage};
-
-let cache = Cache::new(InMemoryStorage::new()).shared();
-```
-
 ## Status
 
-0.1. RFC 9111 coverage: storability, freshness, conditional revalidation, `Vary`, unsafe-method invalidation, plus `stale-if-error` recovery from [RFC 5861]. Background `stale-while-revalidate` is not yet implemented for the server handler — stale entries within their SWR window currently fall through to synchronous revalidation.
+0.1. RFC 9111 coverage: storability, freshness, conditional revalidation, `Vary`, unsafe-method invalidation, plus `stale-if-error` recovery from [RFC 5861]. The client handler performs background `stale-while-revalidate`; the server handler does not — on the server, stale entries within their SWR window fall through to synchronous revalidation.
 
 [RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
 [RFC 5861]: https://www.rfc-editor.org/rfc/rfc5861

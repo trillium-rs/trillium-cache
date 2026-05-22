@@ -1,17 +1,21 @@
-//! HTTP cache handler for Trillium, implementing [RFC 9111] semantics.
+//! HTTP cache for trillium implementing [RFC 9111] semantics, in two handler forms that
+//! share one caching engine.
 //!
-//! The primary form is a server handler — [`Cache`] sits before the handler whose responses
-//! should be cacheable, or in front of a [`trillium-proxy`](https://docs.rs/trillium-proxy)
-//! upstream for shared (CDN-style) caching. With the `client` feature enabled, the
-//! `client` module provides the same caching logic for a
-//! [`trillium-client`](https://docs.rs/trillium-client) user agent.
+//! The primary form is a [`trillium-client`](https://docs.rs/trillium-client) handler,
+//! provided by the `client` module behind the `client` feature. Mount it on the client a
+//! [`trillium-proxy`](https://docs.rs/trillium-proxy) uses to reach its upstream, mark it
+//! shared, and the proxy becomes a CDN-style shared cache in front of that origin. On any
+//! other `trillium-client` it serves as a user-agent cache.
 //!
-//! See [`Cache::new`] for getting started on the server side.
+//! The server form, [`Cache`], sits before a trillium handler and caches that handler's own
+//! responses.
+//!
+//! See the `client` module to get started, or [`Cache::new`] for the server form.
 //!
 //! ## Features
 //!
-//! - `client` — exposes a `trillium-client` `ClientHandler` form of the cache for caching at the
-//!   user-agent layer.
+//! - `client` — the `trillium-client` handler form (the `client` module), for caching at the
+//!   user-agent layer and as a proxy's shared upstream cache.
 //!
 //! ## 0.1 status
 //!
