@@ -41,3 +41,7 @@ env_logger = "0.11"
 name = "proxy_cache"
 required-features = ["client"]
 
+[[example]]
+name = "conformance_proxy"
+required-features = ["client"]
+
