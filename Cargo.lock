@@ -116,8 +116,8 @@ checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
 dependencies = [
  "async-task",
  "concurrent-queue",
- "fastrand",
- "futures-lite",
+ "fastrand 2.4.1",
+ "futures-lite 2.6.1",
  "pin-project-lite",
  "slab",
 ]
@@ -133,7 +133,7 @@ dependencies = [
  "async-io",
  "async-lock",
  "blocking",
- "futures-lite",
+ "futures-lite 2.6.1",
 ]
 
 [[package]]
@@ -146,7 +146,7 @@ dependencies = [
  "cfg-if",
  "concurrent-queue",
  "futures-io",
- "futures-lite",
+ "futures-lite 2.6.1",
  "parking",
  "polling",
  "rustix",
@@ -173,7 +173,7 @@ checksum = "b948000fad4873c1c9339d60f2623323a0cfd3816e5181033c6a5cb68b2accf7"
 dependencies = [
  "async-io",
  "blocking",
- "futures-lite",
+ "futures-lite 2.6.1",
 ]
 
 [[package]]
@@ -236,7 +236,7 @@ dependencies = [
  "async-channel",
  "async-task",
  "futures-io",
- "futures-lite",
+ "futures-lite 2.6.1",
  "piper",
 ]
 
@@ -267,6 +267,12 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cidr"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
 
 [[package]]
 name = "colorchoice"
@@ -422,6 +428,15 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51093e27b0797c359783294ca4f0a911c270184cb10f85783b118614a1501be"
+dependencies = [
+ "instant",
+]
+
+[[package]]
+name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
@@ -486,6 +501,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "full-duplex-async-copy"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb69fcc211c8359cc56981e36370c21f6410d6f9820c68dab273bed4bc58d99e"
+dependencies = [
+ "fastrand 1.9.0",
+ "futures-lite 1.13.0",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -499,11 +525,26 @@ checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
 
 [[package]]
 name = "futures-lite"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49a9d51ce47660b1e808d3c990b4709f2f415d928835a17dfd16991515c46bce"
+dependencies = [
+ "fastrand 1.9.0",
+ "futures-core",
+ "futures-io",
+ "memchr",
+ "parking",
+ "pin-project-lite",
+ "waker-fn",
+]
+
+[[package]]
+name = "futures-lite"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
 dependencies = [
- "fastrand",
+ "fastrand 2.4.1",
  "futures-core",
  "futures-io",
  "parking",
@@ -749,6 +790,15 @@ dependencies = [
  "hashbrown 0.17.1",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "instant"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -998,7 +1048,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c835479a4443ded371d6c535cbfd8d31ad92c5d23ae9770a61bc155e4992a3c1"
 dependencies = [
  "atomic-waker",
- "fastrand",
+ "fastrand 2.4.1",
  "futures-io",
 ]
 
@@ -1333,10 +1383,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "size"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6709c7b6754dca1311b3c73e79fcce40dd414c782c66d88e8823030093b02b"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "sluice"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160b744a45e8261307bcfe03c98e2f8274502207d534c9a64b675c4db1b6bd58"
+dependencies = [
+ "async-channel",
+ "futures-core",
+ "futures-io",
+]
 
 [[package]]
 name = "smallvec"
@@ -1587,7 +1654,7 @@ version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f029b12136c4d188e4aff2c2e834769eb0e35ce023c22c2dd55622e41aa2b0ad"
 dependencies = [
- "futures-lite",
+ "futures-lite 2.6.1",
  "log",
  "trillium-http",
  "trillium-macros",
@@ -1597,8 +1664,9 @@ dependencies = [
 name = "trillium-cache"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "fieldwork",
- "futures-lite",
+ "futures-lite 2.6.1",
  "httpdate",
  "log",
  "moka",
@@ -1607,6 +1675,7 @@ dependencies = [
  "trillium-caching-headers",
  "trillium-client",
  "trillium-http",
+ "trillium-proxy",
  "trillium-smol",
  "trillium-testing",
  "url",
@@ -1633,7 +1702,7 @@ dependencies = [
  "dashmap",
  "encoding_rs",
  "fieldwork",
- "futures-lite",
+ "futures-lite 2.6.1",
  "httparse",
  "log",
  "memchr",
@@ -1641,6 +1710,18 @@ dependencies = [
  "trillium-http",
  "trillium-macros",
  "trillium-server-common",
+]
+
+[[package]]
+name = "trillium-forwarding"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6650af48b790287c7f824fe7ccd8dca7c694ec4d9c37d41436a544c4c6fda83"
+dependencies = [
+ "cidr",
+ "log",
+ "trillium",
+ "trillium-http",
 ]
 
 [[package]]
@@ -1652,9 +1733,9 @@ dependencies = [
  "atomic-waker",
  "encoding_rs",
  "event-listener",
- "fastrand",
+ "fastrand 2.4.1",
  "fieldwork",
- "futures-lite",
+ "futures-lite 2.6.1",
  "hashbrown 0.17.1",
  "httparse",
  "httpdate",
@@ -1684,6 +1765,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "trillium-proxy"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aa40533d6ac63a031d80b368525a34fa060617041b872cf45883fb7fb85a4cb"
+dependencies = [
+ "event-listener",
+ "fastrand 2.4.1",
+ "full-duplex-async-copy",
+ "futures-lite 2.6.1",
+ "log",
+ "size",
+ "sluice",
+ "trillium",
+ "trillium-client",
+ "trillium-forwarding",
+ "trillium-http",
+ "trillium-server-common",
+ "url",
+]
+
+[[package]]
 name = "trillium-server-common"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1692,7 +1794,7 @@ dependencies = [
  "async-channel",
  "async_cell",
  "fieldwork",
- "futures-lite",
+ "futures-lite 2.6.1",
  "listenfd",
  "log",
  "pin-project-lite",
@@ -1714,7 +1816,7 @@ dependencies = [
  "async-net",
  "async-signal",
  "async-task",
- "futures-lite",
+ "futures-lite 2.6.1",
  "log",
  "signal-hook",
  "trillium",
@@ -1734,9 +1836,9 @@ dependencies = [
  "cfg-if",
  "dashmap",
  "env_logger",
- "fastrand",
+ "fastrand 2.4.1",
  "fieldwork",
- "futures-lite",
+ "futures-lite 2.6.1",
  "log",
  "once_cell",
  "serde",
@@ -1814,6 +1916,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "waker-fn"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "317211a0dc0ceedd78fb2ca9a44aed3d7b9b26f81870d485c07122b4350673b7"
 
 [[package]]
 name = "wasip2"

@@ -34,4 +34,10 @@ url = "2.5.8"
 trillium-cache = { path = ".", features = ["client"] }
 trillium-smol = "0.6.1"
 trillium-testing = "0.10"
+trillium-proxy = "0.8"
+env_logger = "0.11"
+
+[[example]]
+name = "proxy_cache"
+required-features = ["client"]
 
