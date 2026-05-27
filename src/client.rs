@@ -564,7 +564,9 @@ impl<S: CacheStorage> Cache<S> {
             return Ok(());
         };
         let len = response_body.content_length();
-        let upstream = Body::new_with_trailers(response_body, len);
+        // Strip wire-format chunked framing so the tee stores the decoded body. The outer
+        // body re-frames for the downstream when `len` is None.
+        let upstream = Body::new_with_trailers(response_body, len).without_chunked_framing();
         log::trace!("cache: miss for {key}, streaming through tee");
         let tee = TeeingReader::new(upstream, put_handle, self.max_cacheable_size);
         conn.set_response_body(Body::new_with_trailers(tee, len));
@@ -581,7 +583,8 @@ async fn copy_into_storage<P: PutHandle>(
     cap: u64,
 ) -> std::io::Result<()> {
     let len = body.content_length();
-    let mut body = Body::new_with_trailers(body, len);
+    // Strip wire-format chunked framing so storage gets the decoded body, not chunk bytes.
+    let mut body = Body::new_with_trailers(body, len).without_chunked_framing();
     let mut buf = [0u8; 8192];
     let mut total: u64 = 0;
     loop {
@@ -910,6 +913,59 @@ mod tests {
         let mut r2 = client.get("http://example.com/x").await?;
         assert_eq!(r2.response_body().read_string().await?, "body-1");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    // A chunked (unknown-length) upstream body must be stored and replayed *decoded* — not as
+    // raw chunk framing. Every other test here uses fixed-length bodies, which read raw and so
+    // never exercised the framing path.
+    #[test(harness)]
+    async fn chunked_upstream_is_stored_and_replayed_decoded() -> TestResult {
+        #[derive(Debug, Clone)]
+        struct ChunkedServer {
+            counter: Arc<AtomicUsize>,
+        }
+        impl ServerHandler for ChunkedServer {
+            async fn run(&self, conn: ServerConn) -> ServerConn {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                // No known length -> the server frames this as Transfer-Encoding: chunked.
+                let body = Body::new_streaming(
+                    futures_lite::io::Cursor::new(b"chunked-body-content".to_vec()),
+                    None,
+                );
+                conn.with_response_header(KnownHeaderName::CacheControl, "max-age=600")
+                    .with_body(body)
+                    .with_status(Status::Ok)
+                    .halt()
+            }
+        }
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let server = ChunkedServer {
+            counter: counter.clone(),
+        };
+        let client = Client::new(ServerConnector::new(server))
+            .with_handler(Cache::new(InMemoryStorage::new()));
+
+        // MISS: the pass-through must deliver the decoded body, not chunk framing.
+        let mut r1 = client.get("http://example.com/x").await?;
+        assert_eq!(
+            r1.response_body().read_string().await?,
+            "chunked-body-content"
+        );
+
+        // HIT: the stored copy must replay decoded, with a known content-length.
+        let mut r2 = client.get("http://example.com/x").await?;
+        assert_eq!(r2.status(), Some(Status::Ok));
+        assert_eq!(
+            r2.response_body().read_string().await?,
+            "chunked-body-content"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "second request served from cache"
+        );
         Ok(())
     }
 

@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-05-26
+
+### Fixed
+
+- The client-side cache handler (the `client` feature) corrupted bodies from origins that
+  responded with chunked transfer-encoding and no `Content-Length`. The chunk framing —
+  size lines, CRLFs, and the terminating `0\r\n` — was treated as body content: it was
+  written into storage and served back, both on a cache hit and on the initial
+  pass-through on a miss. Responses with an unknown-length (chunked) body are now stored
+  and replayed decoded, the same as fixed-length responses.
+
+## [0.1.0] - 2026-05-21
 
 Initial release. An RFC 9111 HTTP cache for trillium in two handler forms that share one
 caching engine. With the optional `client` cargo feature, a `trillium-client` handler caches
