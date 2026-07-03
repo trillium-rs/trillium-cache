@@ -37,6 +37,31 @@ pub(crate) fn effective_response_cache_control(
     (response_headers.cache_control(), false)
 }
 
+// Derive the effective response Cache-Control and its targeted-field flag from a
+// response's headers and caching options. This is a pure function of the two inputs.
+fn derive_response_cache_control(
+    response_headers: &Headers,
+    options: &CacheOptions,
+) -> (Option<CacheControlHeader>, bool) {
+    let (mut response_cache_control, targeted_cc_in_effect) =
+        effective_response_cache_control(response_headers, options);
+
+    // RFC 9111 §5.4: when no Cache-Control is present, treat
+    // `Pragma: no-cache` as if `Cache-Control: no-cache` were set. This
+    // is suppressed when a targeted field took effect (Pragma is part of
+    // the Cache-Control / Expires family the targeted-field rule
+    // displaces).
+    if response_cache_control.is_none()
+        && response_headers
+            .get_str(KnownHeaderName::Pragma)
+            .is_some_and(|p| p.contains("no-cache"))
+    {
+        response_cache_control = Some(CacheControlHeader::from(CacheControlDirective::NoCache));
+    }
+
+    (response_cache_control, targeted_cc_in_effect)
+}
+
 /// RFC 9213 §2.1: targeted fields are Dictionary Structured Fields (RFC
 /// 8941 §3.2). A full SF parser is out of scope, but this catches the
 /// common "garbage trailing tokens" case (e.g. `max-age=10000, &&&&&`) by
@@ -167,24 +192,86 @@ impl CachePolicy {
         response_time: SystemTime,
         options: CacheOptions,
     ) -> Self {
-        let (mut response_cache_control, targeted_cc_in_effect) =
-            effective_response_cache_control(&response_headers, &options);
-
-        // RFC 9111 §5.4: when no Cache-Control is present, treat
-        // `Pragma: no-cache` as if `Cache-Control: no-cache` were set. This
-        // is suppressed when a targeted field took effect (Pragma is part of
-        // the Cache-Control / Expires family the targeted-field rule
-        // displaces).
-        if response_cache_control.is_none()
-            && response_headers
-                .get_str(KnownHeaderName::Pragma)
-                .is_some_and(|p| p.contains("no-cache"))
-        {
-            response_cache_control = Some(CacheControlHeader::from(CacheControlDirective::NoCache));
-        }
+        let (response_cache_control, targeted_cc_in_effect) =
+            derive_response_cache_control(&response_headers, &options);
 
         let vary_snapshot = build_vary_snapshot(&response_headers, request_headers);
 
+        Self {
+            request_method,
+            vary_snapshot,
+            response_status,
+            response_headers,
+            response_cache_control,
+            targeted_cc_in_effect,
+            response_time,
+            options,
+        }
+    }
+}
+
+// On-disk proxy for `CachePolicy`, used by the `FileSystemStorage` backend to persist a
+// policy through rkyv. It carries only the fields captured directly from the exchange;
+// `response_cache_control` and `targeted_cc_in_effect` are a pure function of the stored
+// headers and options, so they are recomputed on load rather than serialized. `CacheOptions`
+// is flattened into individual fields so no rkyv-archived type is generated for the public
+// `CacheOptions`; destructuring it here makes a future added field a compile error until it
+// is threaded through.
+#[cfg(feature = "fs")]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub(crate) struct PolicyRepr {
+    request_method: Method,
+    vary_snapshot: Vec<(String, Option<String>)>,
+    response_status: Status,
+    response_headers: Headers,
+    #[rkyv(with = rkyv::with::AsUnixTime)]
+    response_time: SystemTime,
+    shared: bool,
+    cache_heuristic: f32,
+    immutable_min_time_to_live: Duration,
+}
+
+#[cfg(feature = "fs")]
+impl From<&CachePolicy> for PolicyRepr {
+    fn from(policy: &CachePolicy) -> Self {
+        let CacheOptions {
+            shared,
+            cache_heuristic,
+            immutable_min_time_to_live,
+        } = policy.options;
+        Self {
+            request_method: policy.request_method,
+            vary_snapshot: policy.vary_snapshot.clone(),
+            response_status: policy.response_status,
+            response_headers: policy.response_headers.clone(),
+            response_time: policy.response_time,
+            shared,
+            cache_heuristic,
+            immutable_min_time_to_live,
+        }
+    }
+}
+
+#[cfg(feature = "fs")]
+impl From<PolicyRepr> for CachePolicy {
+    fn from(repr: PolicyRepr) -> Self {
+        let PolicyRepr {
+            request_method,
+            vary_snapshot,
+            response_status,
+            response_headers,
+            response_time,
+            shared,
+            cache_heuristic,
+            immutable_min_time_to_live,
+        } = repr;
+        let options = CacheOptions {
+            shared,
+            cache_heuristic,
+            immutable_min_time_to_live,
+        };
+        let (response_cache_control, targeted_cc_in_effect) =
+            derive_response_cache_control(&response_headers, &options);
         Self {
             request_method,
             vary_snapshot,
@@ -323,6 +410,43 @@ mod tests {
         assert_eq!(
             policy.vary_snapshot,
             vec![("accept-encoding".to_string(), None)]
+        );
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn policy_round_trips_through_rkyv() {
+        let conn = exchange(
+            Method::Get,
+            &[(AcceptEncoding, "gzip")],
+            Status::Ok,
+            &[(CacheControl, "max-age=600"), (Vary, "Accept-Encoding")],
+        );
+        let policy = policy_from(&conn, SystemTime::now(), private_cache());
+
+        let repr = PolicyRepr::from(&policy);
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&repr).unwrap();
+        let restored: CachePolicy = rkyv::from_bytes::<PolicyRepr, rkyv::rancor::Error>(&bytes)
+            .unwrap()
+            .into();
+
+        assert_eq!(restored.request_method, policy.request_method);
+        assert_eq!(restored.response_status, policy.response_status);
+        assert_eq!(restored.vary_snapshot, policy.vary_snapshot);
+        assert_eq!(restored.response_time, policy.response_time);
+        assert_eq!(
+            restored.response_headers.get_str(CacheControl),
+            policy.response_headers.get_str(CacheControl)
+        );
+        assert_eq!(
+            restored.response_headers.get_str(Vary),
+            policy.response_headers.get_str(Vary)
+        );
+        // recomputed from the stored headers + options, not serialized
+        assert_eq!(restored.targeted_cc_in_effect, policy.targeted_cc_in_effect);
+        assert_eq!(
+            restored.response_cache_control.is_some(),
+            policy.response_cache_control.is_some()
         );
     }
 }

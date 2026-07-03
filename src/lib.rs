@@ -51,12 +51,19 @@ mod storage;
 mod tee;
 mod validation;
 
+#[cfg(feature = "fs")]
+mod fs;
+#[cfg(feature = "fs")]
+mod fs_shims;
+
 #[cfg(feature = "client")]
 pub mod client;
 
 #[cfg(test)]
 mod test_helpers;
 
+#[cfg(feature = "fs")]
+pub use fs::{FileSystemStorage, FsPutHandle, FsStoredEntry};
 pub use memory::{InMemoryEntry, InMemoryPutHandle, InMemoryStorage};
 pub use policy::{CacheOptions, CachePolicy};
 pub use server::Cache;

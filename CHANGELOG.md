@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `FileSystemStorage`, a disk-backed `CacheStorage` that persists cached responses under a
+  root directory so they survive process restarts. Bodies stream to and from disk rather than
+  being buffered. Each response is stored as a compact rkyv-encoded metadata sidecar plus a
+  raw body file; the metadata is optimized for fast loading rather than being human-readable.
+  Enable it with the `fs` feature and select an async runtime with one of `smol`, `tokio`, or
+  `async-std`. A byte cap (1 GiB by default) bounds total stored body size, evicting
+  least-recently-used entries and deleting their files once it is reached; override it with
+  `with_max_capacity_bytes` or remove it with `unbounded`. The cap is enforced across
+  restarts and trims a directory that grew beyond it under an earlier configuration.
+
 ## [0.1.1] - 2026-05-26
 
 ### Fixed
