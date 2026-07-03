@@ -4,9 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-06-03
 
 ### Added
+
+- `TieredStorage<Hot, Cold>`, a `CacheStorage` that layers a fast hot tier over a durable cold
+  tier — for example an `InMemoryStorage` working set in front of a `FileSystemStorage` durable
+  set, though any two backends compose. Lookups check the hot tier first; a cold hit is promoted
+  into the hot tier as it is read, so a hot tier emptied by a restart repopulates from cold on
+  demand. Writes populate the hot tier as the body streams and are flushed to the cold tier by a
+  background task, so evicting an entry from the hot tier only drops a fast-path copy while the
+  entry stays served from cold. Because the flush runs in the background, construct it with the
+  two backends and the runtime the surrounding server or client already uses:
+  `TieredStorage::new(hot, cold, runtime)`.
 
 - `FileSystemStorage`, a disk-backed `CacheStorage` that persists cached responses under a
   root directory so they survive process restarts. Bodies stream to and from disk rather than

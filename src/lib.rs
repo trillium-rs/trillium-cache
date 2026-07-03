@@ -49,6 +49,7 @@ mod server;
 mod storability;
 mod storage;
 mod tee;
+mod tiered;
 mod validation;
 
 #[cfg(feature = "fs")]
@@ -68,3 +69,4 @@ pub use memory::{InMemoryEntry, InMemoryPutHandle, InMemoryStorage};
 pub use policy::{CacheOptions, CachePolicy};
 pub use server::Cache;
 pub use storage::{CacheKey, CacheStorage, PutHandle, StoredEntry};
+pub use tiered::{TieredEntry, TieredPutHandle, TieredStorage};
