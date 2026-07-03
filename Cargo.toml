@@ -1,6 +1,6 @@
 [package]
 name = "trillium-cache"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "http cache handler for trillium.rs"
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,11 @@ features = ["client"]
 [features]
 client = ["dep:trillium-client"]
 fs = ["dep:rkyv", "dep:sha2", "dep:cfg-if", "trillium-http/rkyv_08"]
-tokio = ["fs", "dep:tokio", "dep:async-compat"]
+# `tokio::fs` is reactor-bound, so the test harness must run on tokio to exercise the fs backend
+# under this feature; forward it to trillium-testing. smol and async-std need no ambient runtime
+# (their fs adapters run under trillium-testing's default runtimeless harness), so they don't
+# forward — and forwarding more than one runtime would break `--all-features`.
+tokio = ["fs", "dep:tokio", "dep:async-compat", "trillium-testing/tokio"]
 async-std = ["fs", "dep:async-std"]
 smol = ["fs", "dep:async-fs"]
 
@@ -39,6 +43,7 @@ trillium = "1"
 trillium-caching-headers = "0.4"
 trillium-client = { version = "0.9", optional = true }
 trillium-http = { version = "1.4", features = ["unstable"] }
+trillium-server-common = "0.7"
 url = "2.5.8"
 
 [dev-dependencies]
@@ -56,4 +61,8 @@ required-features = ["client"]
 [[example]]
 name = "conformance_proxy"
 required-features = ["client"]
+
+[[example]]
+name = "tiered_cache"
+required-features = ["smol", "client"]
 
