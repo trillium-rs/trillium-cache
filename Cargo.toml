@@ -17,20 +17,32 @@ features = ["client"]
 
 [features]
 client = ["dep:trillium-client"]
+fs = ["dep:rkyv", "dep:sha2", "dep:cfg-if", "trillium-http/rkyv_08"]
+tokio = ["fs", "dep:tokio", "dep:async-compat"]
+async-std = ["fs", "dep:async-std"]
+smol = ["fs", "dep:async-fs"]
 
 [dependencies]
+async-compat = { version = "0.2.5", optional = true }
+async-fs = { version = "2.2.0", optional = true }
+async-std = { version = "1.13.2", optional = true }
+cfg-if = { version = "1.0.4", optional = true }
 fieldwork = "0.5.2"
 httpdate = "1.0.3"
 log = "0.4.29"
 futures-lite = "2.6.1"
-moka = { version = "0.12.15", features = ["future"] }
+moka = { version = "0.12.15", features = ["future", "sync"] }
+rkyv = { version = "0.8.17", optional = true }
+sha2 = { version = "0.10.9", optional = true }
+tokio = { version = "1.50.0", features = ["fs", "io-util"], optional = true }
 trillium = "1"
 trillium-caching-headers = "0.4"
 trillium-client = { version = "0.9", optional = true }
-trillium-http = { version = "1", features = ["unstable"] }
+trillium-http = { version = "1.4", features = ["unstable"] }
 url = "2.5.8"
 
 [dev-dependencies]
+tempfile = "3"
 trillium-cache = { path = ".", features = ["client"] }
 trillium-smol = "0.6.1"
 trillium-testing = "0.10"

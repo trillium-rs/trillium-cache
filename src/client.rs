@@ -643,13 +643,13 @@ mod tests {
         async fn run(&self, conn: ServerConn) -> ServerConn {
             let n = self.counter.fetch_add(1, Ordering::SeqCst);
 
-            if let Some(etag) = self.etag {
-                if conn.request_headers().get_str(KnownHeaderName::IfNoneMatch) == Some(etag) {
-                    return conn
-                        .with_status(Status::NotModified)
-                        .with_response_header(KnownHeaderName::Etag, etag)
-                        .halt();
-                }
+            if let Some(etag) = self.etag
+                && conn.request_headers().get_str(KnownHeaderName::IfNoneMatch) == Some(etag)
+            {
+                return conn
+                    .with_status(Status::NotModified)
+                    .with_response_header(KnownHeaderName::Etag, etag)
+                    .halt();
             }
 
             let mut conn = conn
