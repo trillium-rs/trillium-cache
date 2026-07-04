@@ -1,55 +1,4 @@
 //! Tiered [`CacheStorage`] composing a fast hot tier over a durable cold tier.
-//!
-//! [`TieredStorage`] layers two backends: a `Hot` tier serving the working set from fast
-//! storage and a `Cold` tier holding the larger, durable set. It is itself a [`CacheStorage`],
-//! so it drops in wherever a single backend would go — the headline pairing is an
-//! [`InMemoryStorage`] hot tier over a [`FileSystemStorage`] cold tier, but any two backends
-//! compose.
-//!
-//! [`InMemoryStorage`]: crate::InMemoryStorage
-//! [`FileSystemStorage`]: crate::FileSystemStorage
-//!
-//! ## Runtime
-//!
-//! The write path finishes asynchronously (see below), so a [`TieredStorage`] is constructed
-//! with the [`Runtime`] it spawns that background work on — and it must be the runtime actually
-//! driving the process, or the flush never makes progress. Construct the adapter for your
-//! runtime directly (for example `trillium_smol::SmolRuntime::default()` or
-//! `trillium_tokio::TokioRuntime::default()`); on a client you can instead take it from the
-//! connector with `client.connector().runtime()`. The `tiered_cache` example wires this up
-//! end to end.
-//!
-//! ## Read path
-//!
-//! [`get`] consults the hot tier first and, on a hit, serves from it alone. On a hot miss it
-//! reads the cold tier; opening a cold entry *promotes* it, streaming the body to the reader
-//! and into the hot tier at once (the same teeing used on the origin→user+storage path), so
-//! the working set migrates into fast storage as it is served. A hot tier emptied by a restart
-//! repopulates from cold as entries are read.
-//!
-//! The hot-first lookup assumes the hot tier evicts a whole [`CacheKey`] at once — all `Vary`
-//! variants of a URL together — so a hot hit implies the full variant set for that key is
-//! present. [`InMemoryStorage`] satisfies this. A hot tier that evicts individual variants
-//! could leave siblings only in cold and hide them behind a hot hit; pair `TieredStorage` with
-//! a whole-key-eviction hot tier.
-//!
-//! ## Write path
-//!
-//! [`put`] writes the body into the hot tier as it streams, then finalizing the entry spawns a
-//! background task that copies it into the cold tier — a write-back. The hot tier is populated
-//! synchronously; cold durability follows shortly after, off the request path. A crash in that
-//! window loses the not-yet-flushed entry, which for a cache means only an extra origin fetch.
-//! Because cold ends up holding every stored entry, evicting from hot only drops a fast-path
-//! copy — the entry stays served from cold and re-promotes on its next read.
-//!
-//! ## Policy refresh
-//!
-//! A 304 revalidation refreshes the policy on whichever tier served the entry. After a hot
-//! eviction a request may fall through to a cold copy carrying the pre-refresh policy and
-//! revalidate once more; the content served is always correct.
-//!
-//! [`get`]: CacheStorage::get
-//! [`put`]: CacheStorage::put
 
 use crate::{CacheKey, CachePolicy, CacheStorage, PutHandle, StoredEntry, tee::TeeingReader};
 use futures_lite::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -64,9 +13,56 @@ use trillium_server_common::{Runtime, RuntimeTrait};
 
 /// Two-tier cache storage: a fast hot tier over a durable cold tier.
 ///
-/// See the [module documentation][self] for the read, write, and eviction behavior.
+/// `TieredStorage` layers two backends: a `Hot` tier serving the working set from fast storage
+/// and a `Cold` tier holding the larger, durable set. It is itself a [`CacheStorage`], so it
+/// drops in wherever a single backend would go — the headline pairing is an [`InMemoryStorage`]
+/// hot tier over a [`FileSystemStorage`] cold tier, but any two backends compose.
 ///
 /// `Clone` is available when both tiers are `Clone`, and shares their backing storage.
+///
+/// # Runtime
+///
+/// The write path finishes asynchronously (see below), so a `TieredStorage` is constructed with
+/// the [`Runtime`] it spawns that background work on — and it must be the runtime actually
+/// driving the process, or the flush never makes progress. Construct the adapter for your
+/// runtime directly (for example `trillium_smol::SmolRuntime::default()` or
+/// `trillium_tokio::TokioRuntime::default()`); on a client you can instead take it from the
+/// connector with `client.connector().runtime()`. The `tiered_cache` example wires this up end
+/// to end.
+///
+/// # Read path
+///
+/// [`get`] consults the hot tier first and, on a hit, serves from it alone. On a hot miss it
+/// reads the cold tier; opening a cold entry *promotes* it, streaming the body to the reader
+/// and into the hot tier at once (the same teeing used on the origin→user+storage path), so
+/// the working set migrates into fast storage as it is served. A hot tier emptied by a restart
+/// repopulates from cold as entries are read.
+///
+/// The hot-first lookup assumes the hot tier evicts a whole [`CacheKey`] at once — all `Vary`
+/// variants of a URL together — so a hot hit implies the full variant set for that key is
+/// present. [`InMemoryStorage`] satisfies this. A hot tier that evicts individual variants
+/// could leave siblings only in cold and hide them behind a hot hit; pair `TieredStorage` with
+/// a whole-key-eviction hot tier.
+///
+/// # Write path
+///
+/// [`put`] writes the body into the hot tier as it streams, then finalizing the entry spawns a
+/// background task that copies it into the cold tier — a write-back. The hot tier is populated
+/// synchronously; cold durability follows shortly after, off the request path. A crash in that
+/// window loses the not-yet-flushed entry, which for a cache means only an extra origin fetch.
+/// Because cold ends up holding every stored entry, evicting from hot only drops a fast-path
+/// copy — the entry stays served from cold and re-promotes on its next read.
+///
+/// # Policy refresh
+///
+/// A 304 revalidation refreshes the policy on whichever tier served the entry. After a hot
+/// eviction a request may fall through to a cold copy carrying the pre-refresh policy and
+/// revalidate once more; the content served is always correct.
+///
+/// [`InMemoryStorage`]: crate::InMemoryStorage
+/// [`FileSystemStorage`]: crate::FileSystemStorage
+/// [`get`]: CacheStorage::get
+/// [`put`]: CacheStorage::put
 pub struct TieredStorage<Hot, Cold> {
     hot: Hot,
     cold: Cold,

@@ -1,30 +1,4 @@
 //! In-memory [`CacheStorage`].
-//!
-//! [`InMemoryStorage`] is suitable for production reverse-proxy and
-//! client-side caching: byte-aware size cap, scan-resistant
-//! admission, and concurrent reads and writes on distinct keys
-//! without contention.
-//!
-//! ## Granularity
-//!
-//! Eviction is coarse: the unit is one [`CacheKey`] (method + URL),
-//! and all `Vary` variants stored under that key live and die together
-//! during eviction. In typical traffic patterns variants of the same URL
-//! are hot or cold together (a single `Accept-Encoding` is usually
-//! dominant, etc.), so the cost is bounded — at worst we keep a few
-//! cold variants resident alongside one hot variant. This is correct
-//! per RFC 9111; the only consequence is slightly less efficient use
-//! of memory than per-variant eviction would give.
-//!
-//! ## Sizing
-//!
-//! The byte cap is enforced over stored *body* bytes only (the
-//! dominant cost); headers and other metadata are not counted. The
-//! per-response cap on [`Cache::with_max_cacheable_size`] interacts
-//! independently — that one bounds how large any single response may
-//! be; the storage cap bounds total resident size across the cache.
-//!
-//! [`Cache::with_max_cacheable_size`]: crate::Cache::with_max_cacheable_size
 
 use crate::{CacheKey, CachePolicy, CacheStorage, PutHandle, StoredEntry};
 use futures_lite::{AsyncRead, AsyncWrite};
@@ -63,6 +37,10 @@ impl Debug for Variant {
 
 /// Bounded in-memory cache storage.
 ///
+/// Suitable for production reverse-proxy and client-side caching: byte-aware size cap,
+/// scan-resistant admission, and concurrent reads and writes on distinct keys without
+/// contention.
+///
 /// Defaults to a 256 MiB byte cap; override with
 /// [`with_max_capacity_bytes`][Self::with_max_capacity_bytes],
 /// [`unbounded`][Self::unbounded],
@@ -72,6 +50,24 @@ impl Debug for Variant {
 /// construction, before the storage is populated or shared.
 ///
 /// `Clone` is cheap — clones share the same backing storage.
+///
+/// # Granularity
+///
+/// Eviction is coarse: the unit is one [`CacheKey`] (method + URL), and all `Vary` variants
+/// stored under that key live and die together during eviction. In typical traffic patterns
+/// variants of the same URL are hot or cold together (a single `Accept-Encoding` is usually
+/// dominant, etc.), so the cost is bounded — at worst we keep a few cold variants resident
+/// alongside one hot variant. This is correct per RFC 9111; the only consequence is slightly
+/// less efficient use of memory than per-variant eviction would give.
+///
+/// # Sizing
+///
+/// The byte cap is enforced over stored *body* bytes only (the dominant cost); headers and
+/// other metadata are not counted. The per-response cap on [`Cache::with_max_cacheable_size`]
+/// interacts independently — that one bounds how large any single response may be; the storage
+/// cap bounds total resident size across the cache.
+///
+/// [`Cache::with_max_cacheable_size`]: crate::Cache::with_max_cacheable_size
 #[derive(Clone)]
 pub struct InMemoryStorage {
     cache: Cache<CacheKey, Bucket>,
