@@ -13,7 +13,7 @@ categories = ["caching", "web-programming::http-client"]
 development = ["trillium-cache"]
 
 [package.metadata.docs.rs]
-features = ["client"]
+features = ["client", "fs", "smol"]
 
 [features]
 client = ["dep:trillium-client"]
