@@ -1,53 +1,4 @@
 //! Filesystem-backed [`CacheStorage`].
-//!
-//! [`FileSystemStorage`] persists cached responses under a root directory so they survive
-//! process restarts. Each response is two files: a `<hash>.meta` sidecar holding the
-//! [`CachePolicy`] and any trailers as an rkyv-encoded binary blob, and a `<hash>.body`
-//! holding the raw body bytes and nothing else. Bodies stream in and out — [`put`] writes to
-//! a temporary file the caller feeds incrementally, and [`open`] streams the stored body back
-//! without loading it into memory. The metadata is not human-readable; it is optimized for
-//! compact, fast loading rather than inspection.
-//!
-//! ## Layout
-//!
-//! Entries live at `<root>/<key-hash>/<variant-hash>.{meta,body}`. The key hash is a SHA-256
-//! of the request method and URL; the variant hash is a SHA-256 of the `Vary` signature, so
-//! the multiple variants of one URL are sibling files in the same directory and [`get`]
-//! enumerates them by reading that directory. Writing a variant that already exists replaces
-//! it.
-//!
-//! ## Durability
-//!
-//! Writes commit by renaming a fully-written temporary file into place, and the `.meta` is
-//! written last — a reader treats it as the commit marker, so a half-written or
-//! abandoned entry (a [`PutHandle`] dropped without [`finalize`]) is never visible to
-//! [`get`].
-//!
-//! ## Capacity
-//!
-//! A byte cap (1 GiB by default) bounds the total stored body size. When a write would push
-//! the total past the cap, least-recently-used variants are evicted — their `.meta` and
-//! `.body` files deleted — until the cache fits. The cap counts body bytes only, per
-//! variant, matching the granularity of the on-disk layout. Reads count as use, so a
-//! frequently-served variant outlives idle ones. Override with
-//! [`with_max_capacity_bytes`] or remove the cap with [`unbounded`].
-//!
-//! The cap is tracked in an in-memory index built by scanning the root at construction, so
-//! it survives restarts (recency resets to whatever order the scan encounters). A directory
-//! that grew past the current cap under an older, unbounded configuration is trimmed to fit
-//! on the next construction.
-//!
-//! ## Runtime
-//!
-//! Filesystem access goes through the runtime selected by the `smol`, `tokio`, or
-//! `async-std` feature. Enabling `fs` without one of those compiles but panics on use.
-//!
-//! [`put`]: CacheStorage::put
-//! [`get`]: CacheStorage::get
-//! [`open`]: StoredEntry::open
-//! [`finalize`]: PutHandle::finalize
-//! [`with_max_capacity_bytes`]: FileSystemStorage::with_max_capacity_bytes
-//! [`unbounded`]: FileSystemStorage::unbounded
 
 use crate::{
     CacheKey, CachePolicy, CacheStorage, PutHandle, StoredEntry, fs_shims, policy::PolicyRepr,
@@ -81,12 +32,60 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Filesystem-backed cache storage rooted at a directory.
 ///
+/// Persists cached responses under a root directory so they survive process restarts. Each
+/// response is two files: a `<hash>.meta` sidecar holding the [`CachePolicy`] and any trailers
+/// as an rkyv-encoded binary blob, and a `<hash>.body` holding the raw body bytes and nothing
+/// else. Bodies stream in and out — [`put`] writes to a temporary file the caller feeds
+/// incrementally, and [`open`] streams the stored body back without loading it into memory. The
+/// metadata is not human-readable; it is optimized for compact, fast loading rather than
+/// inspection.
+///
 /// Defaults to a 1 GiB byte cap; override with
 /// [`with_max_capacity_bytes`][Self::with_max_capacity_bytes] or remove it with
 /// [`unbounded`][Self::unbounded].
 ///
 /// `Clone` is cheap — clones share the same root and capacity index, and see each other's
 /// writes.
+///
+/// # Layout
+///
+/// Entries live at `<root>/<key-hash>/<variant-hash>.{meta,body}`. The key hash is a SHA-256
+/// of the request method and URL; the variant hash is a SHA-256 of the `Vary` signature, so
+/// the multiple variants of one URL are sibling files in the same directory and [`get`]
+/// enumerates them by reading that directory. Writing a variant that already exists replaces
+/// it.
+///
+/// # Durability
+///
+/// Writes commit by renaming a fully-written temporary file into place, and the `.meta` is
+/// written last — a reader treats it as the commit marker, so a half-written or abandoned entry
+/// (a [`PutHandle`] dropped without [`finalize`]) is never visible to [`get`].
+///
+/// # Capacity
+///
+/// A byte cap (1 GiB by default) bounds the total stored body size. When a write would push
+/// the total past the cap, least-recently-used variants are evicted — their `.meta` and
+/// `.body` files deleted — until the cache fits. The cap counts body bytes only, per variant,
+/// matching the granularity of the on-disk layout. Reads count as use, so a frequently-served
+/// variant outlives idle ones. Override with [`with_max_capacity_bytes`] or remove the cap with
+/// [`unbounded`].
+///
+/// The cap is tracked in an in-memory index built by scanning the root at construction, so it
+/// survives restarts (recency resets to whatever order the scan encounters). A directory that
+/// grew past the current cap under an older, unbounded configuration is trimmed to fit on the
+/// next construction.
+///
+/// # Runtime
+///
+/// Filesystem access goes through the runtime selected by the `smol`, `tokio`, or `async-std`
+/// feature. Enabling `fs` without one of those compiles but panics on use.
+///
+/// [`put`]: CacheStorage::put
+/// [`get`]: CacheStorage::get
+/// [`open`]: StoredEntry::open
+/// [`finalize`]: PutHandle::finalize
+/// [`with_max_capacity_bytes`]: FileSystemStorage::with_max_capacity_bytes
+/// [`unbounded`]: FileSystemStorage::unbounded
 #[derive(Clone)]
 pub struct FileSystemStorage {
     root: Arc<PathBuf>,
