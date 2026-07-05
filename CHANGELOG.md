@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-04
+
+### Added
+
+- `FileSystemStorage::with_time_to_idle` and `FileSystemStorage::with_time_to_live`, bringing the
+  disk backend to parity with `InMemoryStorage`'s time-based eviction. Idle eviction drops
+  variants not read within a duration; TTL drops them a duration after they are stored. Both
+  delete the variant's `.meta`/`.body` files on eviction, like the existing size cap. Because
+  `TieredStorage` composes configured backends, a `FileSystemStorage` cold tier carries its own
+  expiry — no tiered API change. Expiry is best-effort space reclamation, not a hard read gate:
+  `get` enumerates on-disk files, so a just-expired variant may be served in the brief window
+  before its files are deleted. It is never stale — RFC 9111 freshness stays enforced by the
+  `Cache` handler from the stored `CachePolicy`, independent of storage-level expiry.
+
 ## [0.2.0] - 2026-06-03
 
 ### Added

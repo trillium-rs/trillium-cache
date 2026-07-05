@@ -1126,20 +1126,29 @@ mod tests {
             .downcast_handler::<Cache<InMemoryStorage>>()
             .expect("cache handler installed");
         let key = CacheKey::new(Method::Get, "http://example.com/x".parse().unwrap());
-        // Wait briefly for the background put to land in storage.
+        use futures_lite::AsyncReadExt;
+        // The stale entry is present from the start, so waiting for the entry to
+        // become non-empty proves nothing. Poll until the background put has
+        // replaced the body with the fresh origin response.
+        let mut buf = Vec::new();
         for _ in 0..100 {
-            if !cache.storage().get(&key).await.is_empty() {
-                break;
+            let entries = cache.storage().get(&key).await;
+            if let [entry] = entries.as_slice() {
+                buf.clear();
+                entry
+                    .clone()
+                    .open()
+                    .await
+                    .unwrap()
+                    .read_to_end(&mut buf)
+                    .await
+                    .unwrap();
+                if buf == b"body-0" {
+                    break;
+                }
             }
             runtime.delay(Duration::from_millis(10)).await;
         }
-        let entries = cache.storage().get(&key).await;
-        assert_eq!(entries.len(), 1);
-        let body = entries[0].clone().open().await.unwrap();
-        use futures_lite::AsyncReadExt;
-        let mut buf = Vec::new();
-        let mut body = body;
-        body.read_to_end(&mut buf).await.unwrap();
         assert_eq!(&buf, b"body-0");
         Ok(())
     }

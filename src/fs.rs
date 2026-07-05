@@ -16,6 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
+    time::Duration,
 };
 use trillium_http::{Body, BodySource, Headers};
 
@@ -42,7 +43,9 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// Defaults to a 1 GiB byte cap; override with
 /// [`with_max_capacity_bytes`][Self::with_max_capacity_bytes] or remove it with
-/// [`unbounded`][Self::unbounded].
+/// [`unbounded`][Self::unbounded]. Optional time-based eviction is available through
+/// [`with_time_to_idle`][Self::with_time_to_idle] and
+/// [`with_time_to_live`][Self::with_time_to_live] (off by default).
 ///
 /// `Clone` is cheap — clones share the same root and capacity index, and see each other's
 /// writes.
@@ -75,6 +78,19 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// grew past the current cap under an older, unbounded configuration is trimmed to fit on the
 /// next construction.
 ///
+/// # Expiry
+///
+/// Beyond the size cap, entries can be evicted on a timer:
+/// [`with_time_to_idle`][Self::with_time_to_idle] drops variants not read within a duration,
+/// [`with_time_to_live`][Self::with_time_to_live] drops them a duration after they are stored.
+/// Both delete the variant's files on eviction, just like size eviction. This is best-effort
+/// space reclamation rather than a hard read gate — [`get`][CacheStorage::get] enumerates the
+/// files on disk, so a just-expired variant may still be served in the brief window before its
+/// files are deleted. It is never a correctness hazard: RFC 9111 freshness is enforced by the
+/// [`Cache`](crate::Cache) handler from the stored [`CachePolicy`], independent of this
+/// storage-level expiry. Both clocks are seeded at construction, so a reopened directory times
+/// each entry from the reopen, not from its pre-restart history.
+///
 /// # Runtime
 ///
 /// Filesystem access goes through the runtime selected by the `smol`, `tokio`, or `async-std`
@@ -91,6 +107,8 @@ pub struct FileSystemStorage {
     root: Arc<PathBuf>,
     index: Cache<VariantId, u64>,
     max_capacity_bytes: Option<u64>,
+    time_to_idle: Option<Duration>,
+    time_to_live: Option<Duration>,
 }
 
 impl Debug for FileSystemStorage {
@@ -99,6 +117,8 @@ impl Debug for FileSystemStorage {
             .field("root", &self.root)
             .field("weighted_size", &self.index.weighted_size())
             .field("max_capacity_bytes", &self.max_capacity_bytes)
+            .field("time_to_idle", &self.time_to_idle)
+            .field("time_to_live", &self.time_to_live)
             .finish()
     }
 }
@@ -110,12 +130,14 @@ impl FileSystemStorage {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = Arc::new(root.into());
         let max_capacity_bytes = Some(DEFAULT_MAX_CAPACITY_BYTES);
-        let index = build_index(Arc::clone(&root), max_capacity_bytes);
+        let index = build_index(Arc::clone(&root), max_capacity_bytes, None, None);
         scan_root(&root, &index);
         Self {
             root,
             index,
             max_capacity_bytes,
+            time_to_idle: None,
+            time_to_live: None,
         }
     }
 
@@ -133,6 +155,41 @@ impl FileSystemStorage {
     /// configuration.
     pub fn unbounded(mut self) -> Self {
         self.max_capacity_bytes = None;
+        self.rebuild();
+        self
+    }
+
+    /// Evict entries that have not been read in this duration, deleting their files. Off by
+    /// default.
+    ///
+    /// This is best-effort space reclamation, not a read gate: [`get`](CacheStorage::get)
+    /// enumerates the files on disk rather than the expiry index, so a just-expired variant may
+    /// still be served in the window before the eviction is processed and its files deleted. It
+    /// never serves *stale* content — RFC 9111 freshness is enforced by the
+    /// [`Cache`](crate::Cache) handler from the stored [`CachePolicy`], independent of this
+    /// storage-level expiry. (The in-memory backend's idle eviction, by contrast, `get`
+    /// observes as a hard miss.)
+    ///
+    /// The idle clock is seeded at construction: a reopened directory counts idle time from the
+    /// reopen, not from each entry's last read before the restart.
+    pub fn with_time_to_idle(mut self, duration: Duration) -> Self {
+        self.time_to_idle = Some(duration);
+        self.rebuild();
+        self
+    }
+
+    /// Evict entries this duration after their last insert regardless of access, deleting their
+    /// files. Off by default.
+    ///
+    /// Best-effort like [`with_time_to_idle`](Self::with_time_to_idle): a just-expired variant
+    /// may be served until its files are deleted, but never past RFC 9111 freshness, which the
+    /// [`Cache`](crate::Cache) handler enforces separately. This TTL is independent of that
+    /// freshness — an entry may be evicted while still fresh, or linger briefly past it.
+    ///
+    /// The clock is seeded at construction, so a reopened directory counts each entry's TTL
+    /// from the reopen rather than its original store time.
+    pub fn with_time_to_live(mut self, duration: Duration) -> Self {
+        self.time_to_live = Some(duration);
         self.rebuild();
         self
     }
@@ -161,7 +218,12 @@ impl FileSystemStorage {
     // new cap while preserving on-disk entries (unlike the in-memory backend, disk data
     // survives a reconfigure).
     fn rebuild(&mut self) {
-        self.index = build_index(Arc::clone(&self.root), self.max_capacity_bytes);
+        self.index = build_index(
+            Arc::clone(&self.root),
+            self.max_capacity_bytes,
+            self.time_to_idle,
+            self.time_to_live,
+        );
         scan_root(&self.root, &self.index);
     }
 }
@@ -177,7 +239,12 @@ struct VariantId {
 // Build the capacity index. The eviction listener deletes a variant's files when moka
 // evicts it for size or expiry; replacement and explicit invalidation are handled at their
 // call sites, so the listener ignores those causes.
-fn build_index(root: Arc<PathBuf>, max_capacity_bytes: Option<u64>) -> Cache<VariantId, u64> {
+fn build_index(
+    root: Arc<PathBuf>,
+    max_capacity_bytes: Option<u64>,
+    time_to_idle: Option<Duration>,
+    time_to_live: Option<Duration>,
+) -> Cache<VariantId, u64> {
     let mut builder = Cache::<VariantId, u64>::builder()
         .weigher(|_key, &body_len| u32::try_from(body_len).unwrap_or(u32::MAX))
         .eviction_listener(move |id: Arc<VariantId>, _body_len, cause: RemovalCause| {
@@ -189,6 +256,12 @@ fn build_index(root: Arc<PathBuf>, max_capacity_bytes: Option<u64>) -> Cache<Var
         });
     if let Some(cap) = max_capacity_bytes {
         builder = builder.max_capacity(cap);
+    }
+    if let Some(tti) = time_to_idle {
+        builder = builder.time_to_idle(tti);
+    }
+    if let Some(ttl) = time_to_live {
+        builder = builder.time_to_live(ttl);
     }
     builder.build()
 }
@@ -868,6 +941,46 @@ mod tests {
         storage.run_pending_tasks().await;
         assert_eq!(storage.entry_count(), 1);
         assert_eq!(storage.weighted_size(), 300);
+        Ok(())
+    }
+
+    // Generous margin (>2x the TTL) over the real clock keeps these timing tests robust under
+    // loaded CI; blocking sleeps are fine in a test and advance moka's Instant-based expiry.
+    #[test(harness)]
+    async fn time_to_live_evicts_and_deletes_files() -> TestResult {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            FileSystemStorage::new(dir.path()).with_time_to_live(Duration::from_millis(50));
+        store_at(&storage, "http://example.com/", b"x").await;
+        storage.run_pending_tasks().await;
+        assert_eq!(storage.entry_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(120));
+        storage.run_pending_tasks().await;
+        assert_eq!(storage.entry_count(), 0);
+
+        // A fresh scan of the same root proves the eviction listener deleted the files, rather
+        // than the index merely forgetting them.
+        let reopened = FileSystemStorage::new(dir.path()).unbounded();
+        assert_eq!(reopened.entry_count(), 0);
+        Ok(())
+    }
+
+    #[test(harness)]
+    async fn time_to_idle_evicts_unread_entries() -> TestResult {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            FileSystemStorage::new(dir.path()).with_time_to_idle(Duration::from_millis(50));
+        store_at(&storage, "http://example.com/", b"x").await;
+        storage.run_pending_tasks().await;
+        assert_eq!(storage.entry_count(), 1);
+
+        // No reads, so the entry sits idle past its TTI and is evicted with its files.
+        std::thread::sleep(Duration::from_millis(120));
+        storage.run_pending_tasks().await;
+        assert_eq!(storage.entry_count(), 0);
+        let reopened = FileSystemStorage::new(dir.path()).unbounded();
+        assert_eq!(reopened.entry_count(), 0);
         Ok(())
     }
 }
