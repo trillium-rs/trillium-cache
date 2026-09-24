@@ -631,18 +631,18 @@ dependencies = [
 
 [[package]]
 name = "fieldwork"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dd017babc84497a6270475d80d5fb285cab36f6719daca3b130446ca34372da"
+checksum = "8ed0783f87bbea70cf19343805fc5680601026ba38f7816154644652a04a464a"
 dependencies = [
  "fieldwork-derive",
 ]
 
 [[package]]
 name = "fieldwork-derive"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d2cd106c285788bb67746bfdcfe0c7d08fc58ae7c7c3914b8da9bd3a61c958"
+checksum = "62b9a9183a80dfc118d7b62213dcac5b67301d8de435e7be56e5c0f6794f448c"
 dependencies = [
  "proc-macro2",
  "quote",
