@@ -292,6 +292,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -361,6 +367,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,10 +404,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
 
 [[package]]
+name = "coarsetime"
+version = "0.1.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eae63702c5627c75addbfb1ea9d1b3842205a6ffd43e4cce884a2a9eb1828fd7"
+dependencies = [
+ "libc",
+ "wasix",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "static_assertions",
+ "zmij",
+]
 
 [[package]]
 name = "concurrent-queue"
@@ -631,18 +670,18 @@ dependencies = [
 
 [[package]]
 name = "fieldwork"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dd017babc84497a6270475d80d5fb285cab36f6719daca3b130446ca34372da"
+checksum = "f2499e2fde25b65b435d019cda2d539811c498fe6f3a365a30fa1a01a31a15e1"
 dependencies = [
  "fieldwork-derive",
 ]
 
 [[package]]
 name = "fieldwork-derive"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d2cd106c285788bb67746bfdcfe0c7d08fc58ae7c7c3914b8da9bd3a61c958"
+checksum = "8725d15cf0ea3f9e1cca062146a95be253bd2b299b3590e1b065b62499f9c8f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -945,6 +984,12 @@ dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -1589,26 +1634,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
-name = "smartcow"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "656fcb1c1fca8c4655372134ce87d8afdf5ec5949ebabe8d314be0141d8b5da2"
-dependencies = [
- "smartstring",
-]
-
-[[package]]
-name = "smartstring"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
-dependencies = [
- "autocfg",
- "static_assertions",
- "version_check",
-]
-
-[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1739,7 +1764,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -1886,14 +1911,14 @@ dependencies = [
 
 [[package]]
 name = "trillium"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfd13d61c47d3f4bb20a9975b259aba6962392589c800e20b0e7c5626cf459e9"
+checksum = "453a5ef2696059f30bf8a484b523e8d6f78bd382a1ecc6c275c3abde658b4f36"
 dependencies = [
  "futures-lite",
  "log",
  "trillium-http",
- "trillium-macros",
+ "trillium-macros 0.1.0",
 ]
 
 [[package]]
@@ -1939,22 +1964,25 @@ dependencies = [
 
 [[package]]
 name = "trillium-client"
-version = "0.9.18"
+version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e186b5d60931896fd6222e898d28a3200c3a57eceb46bb9d6756db1a890b3b8"
+checksum = "5b4036e707b735e90eec9b6e7e6e3d9808c2878980196134c44fe270005f24c6"
 dependencies = [
  "async-lock",
+ "base64",
  "crossbeam-queue",
  "dashmap",
  "encoding_rs",
  "fieldwork",
  "futures-lite",
+ "ipnet",
  "log",
  "memchr",
  "mime",
+ "percent-encoding",
  "smallvec",
  "trillium-http",
- "trillium-macros",
+ "trillium-macros 0.2.0",
  "trillium-server-common",
 ]
 
@@ -1972,11 +2000,13 @@ dependencies = [
 
 [[package]]
 name = "trillium-http"
-version = "1.7.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86fa0336aec1e7204410bc538c53271f9581311387945ac4d1c0ac99a9d596bd"
+checksum = "25b1eeca2b50bec88283621c558579c0a38af8104e59c04fb873bd767ef5e79f"
 dependencies = [
  "atomic-waker",
+ "coarsetime",
+ "compact_str",
  "encoding_rs",
  "event-listener 5.4.2",
  "fastrand",
@@ -1984,18 +2014,17 @@ dependencies = [
  "futures-lite",
  "hashbrown 0.17.1",
  "httpdate",
+ "itoa",
  "log",
  "memchr",
  "mime",
  "pin-project-lite",
  "rkyv",
  "smallvec",
- "smartcow",
- "smartstring",
  "swansong",
  "sync_wrapper",
  "thiserror",
- "trillium-macros",
+ "trillium-macros 0.1.0",
  "type-set",
 ]
 
@@ -2008,6 +2037,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "trillium-macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d6ef31920e7125a69da032831dd8e4ce60735460ad4841d124abfd9fa883040"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2033,9 +2073,9 @@ dependencies = [
 
 [[package]]
 name = "trillium-server-common"
-version = "0.7.12"
+version = "0.7.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc17bdff17cb1869a68d81aa9112e01b3df7bd58af4e598be58a54fb334412b9"
+checksum = "50d90bb31d21d879b8b469a40b57cbe4a4224cc5a3fdc01ac4736dc9ab5ab296"
 dependencies = [
  "async-channel 2.5.0",
  "async_cell",
@@ -2071,7 +2111,7 @@ dependencies = [
  "signal-hook",
  "trillium",
  "trillium-http",
- "trillium-macros",
+ "trillium-macros 0.1.0",
  "trillium-server-common",
 ]
 
@@ -2097,7 +2137,7 @@ dependencies = [
  "trillium",
  "trillium-client",
  "trillium-http",
- "trillium-macros",
+ "trillium-macros 0.1.0",
  "trillium-server-common",
  "trillium-tokio",
  "url",
@@ -2117,7 +2157,7 @@ dependencies = [
  "tokio-stream",
  "trillium",
  "trillium-http",
- "trillium-macros",
+ "trillium-macros 0.1.0",
  "trillium-server-common",
 ]
 
@@ -2205,6 +2245,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
 dependencies = [
  "wit-bindgen",
+]
+
+[[package]]
+name = "wasix"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae86f02046da16a333a9129d31451423e1657737ecdafed4193838a5f54c5cfe"
+dependencies = [
+ "wasi",
 ]
 
 [[package]]
